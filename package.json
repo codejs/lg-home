@@ -4,13 +4,14 @@
   "description": "A webapp for controlling LG home appliance",
   "main": "dist/server/index.js",
   "scripts": {
-    "test": "echo \"No tests yet\"",
+    "test": "node --import tsx --test --test-reporter=spec \"test/**/*.test.ts\"",
     "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch --env-file-if-exists=.env src/server/index.ts",
     "dev:web": "vite",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node --env-file-if-exists=.env dist/server/index.js",
-    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "add_user": "tsx --env-file-if-exists=.env src/server/cli/add-user.ts",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.test.json",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "archive": "bash scripts/archive.sh"
@@ -32,14 +33,13 @@
     "node": "22.21.0"
   },
   "dependencies": {
-    "@fastify/static": "10.1.11",
+    "@fastify/static": "10.1.10",
     "@tanstack/react-query": "5.107.1",
-    "better-sqlite3": "13.2.0",
+    "better-sqlite3": "13.0.3",
     "drizzle-orm": "0.45.4",
     "fastify": "5.12.8",
     "react": "19.3.1",
-    "react-dom": "19.3.1",
-    "thinqconnect": "0.9.10-beta"
+    "react-dom": "19.3.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",

@@ -1,18 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { desc, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
-import { thinq, unwrap } from "../thinq.js";
-
-/** Shape of one entry in the ThinQ `GET /devices` response. */
-interface ThinQDevice {
-  deviceId: string;
-  deviceInfo: {
-    deviceType: string;
-    modelName?: string;
-    alias?: string;
-    reportable?: boolean;
-  };
-}
+import { thinq } from "../thinq/index.js";
 
 export async function deviceRoutes(app: FastifyInstance) {
   /** List devices from the local database (fast, works offline). */
@@ -22,7 +11,7 @@ export async function deviceRoutes(app: FastifyInstance) {
 
   /** Fetch the device list from ThinQ and upsert it into the database. */
   app.post("/api/devices/sync", async () => {
-    const list = unwrap<ThinQDevice[]>(await thinq().asyncGetDeviceList()) ?? [];
+    const list = await thinq().getDevices();
     const now = new Date();
     db.transaction((tx) => {
       for (const d of list) {
@@ -49,7 +38,7 @@ export async function deviceRoutes(app: FastifyInstance) {
     const device = db.select().from(schema.devices).where(eq(schema.devices.id, req.params.id)).get();
     if (!device) return reply.code(404).send({ error: "Unknown device; run a sync first" });
 
-    const state = unwrap<Record<string, unknown>>(await thinq().asyncGetDeviceStatus(device.id));
+    const state = await thinq().getDeviceStatus(device.id);
     db.insert(schema.deviceStates).values({ deviceId: device.id, state, recordedAt: new Date() }).run();
     return state;
   });
@@ -71,7 +60,7 @@ export async function deviceRoutes(app: FastifyInstance) {
 
   /** The device profile: which resources/properties exist and which are writable. */
   app.get<{ Params: { id: string } }>("/api/devices/:id/profile", async (req) => {
-    return unwrap(await thinq().asyncGetDeviceProfile(req.params.id));
+    return thinq().getDeviceProfile(req.params.id);
   });
 
   /**
@@ -82,11 +71,11 @@ export async function deviceRoutes(app: FastifyInstance) {
     "/api/devices/:id/control",
     { schema: { body: { type: "object", minProperties: 1 } } },
     async (req) => {
-      const result = unwrap(await thinq().asyncPostDeviceControl(req.params.id, req.body));
+      const result = await thinq().controlDevice(req.params.id, req.body);
       db.insert(schema.events)
         .values({ deviceId: req.params.id, kind: "control", payload: req.body, createdAt: new Date() })
         .run();
-      return result ?? { ok: true };
+      return Object.keys(result).length ? result : { ok: true };
     },
   );
 }

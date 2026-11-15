@@ -10,7 +10,8 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // Forward API calls to the Fastify server during development.
-    proxy: { "/api": "http://localhost:3000" },
+    // Forward API calls to the Fastify server during development. The regex
+    // keeps source modules such as /api.ts from being proxied too.
+    proxy: { "^/api/": "http://localhost:3000" },
   },
 });
