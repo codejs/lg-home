@@ -147,3 +147,19 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Local SQLite database
+data/*
+!data/.gitkeep
+
+# Codebase archives (npm run archive)
+archive/
+
+# IntelliJ IDEA / JetBrains project files
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# macOS Finder metadata
+.DS_Store
