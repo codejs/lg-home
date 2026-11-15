@@ -18,9 +18,10 @@ npm run dev                 # API on :3000, SPA on http://localhost:5173
 
 Production: `npm run build && npm start` (serves the API and SPA on :3000).
 
-Tests: `npm test` runs unit tests for the ThinQ client and an end-to-end test that
-boots the server against a mock ThinQ API (no network or real account needed).
-`npm run typecheck` checks server, web and test code.
+Tests: `npm test` runs unit tests for the ThinQ client, contract tests for the
+[fake ThinQ API](#fake-thinq-api), and an integration test that boots the server
+against the fake (no network or real account needed). `npm run typecheck`
+checks server, web and test code.
 
 The project `.npmrc` sets `ignore-scripts=true`: better-sqlite3 ships prebuilt
 binaries, but npm would otherwise run a no-op `node-gyp rebuild` that downloads
@@ -69,3 +70,62 @@ from `THINQ_COUNTRY_CODE` (`api-aic` Americas, `api-eic` Europe/Middle East/Afri
 
 Failures come back as `502` with `thinqStatus`/`thinqCode` from ThinQ, `504` when
 ThinQ times out (15 s), and `503` when the token or country is not configured.
+
+## Fake ThinQ API
+
+`test/fake-thinq/` is a stand-in for the ThinQ Connect API, for integration
+tests and for working on the app without an LG account or real appliances. It
+speaks the same protocol as the real service (paths, required headers, response
+and error envelopes) and serves two devices:
+
+| Device | Type | ID | Notes |
+| --- | --- | --- | --- |
+| Kitchen Fridge | `DEVICE_REFRIGERATOR` | `b2f6c91d…7c6d` | Fridge (1–7 °C) and freezer (−23 to −15 °C) set points, express mode, power save, fresh air filter; controls locked in sabbath mode |
+| Dishwasher | `DEVICE_DISH_WASHER` | `7d3e9a1c…1a2b` | `START` / `STOP` / `POWER_OFF`; starting needs remote start enabled on the appliance (off by default) and a closed door; programmes count down and finish as time passes |
+
+Control commands are checked against each device's profile: unknown or
+read-only properties, out-of-range values and wrong types are rejected with
+ThinQ-style error codes, and accepted commands change the state. The fake also
+checks the bearer token, `x-api-key`, the required `x-*` headers and that
+every `x-message-id` is well-formed and unique.
+
+Run the app against it:
+
+```sh
+npm run add_user:fake -- alice   # login for the fake setup (separate database)
+npm run dev:fake                 # fake ThinQ on :8090 + API on :3000 + SPA on :5173
+```
+
+`dev:fake` loads `test/fake-thinq/fake.env` after `.env`, which points the
+server at the fake and uses `data/lg-home-fake.db` so fake devices never mix
+with real ones. To run only the fake: `npm run fake-thinq` (options:
+`FAKE_THINQ_PORT`, `FAKE_THINQ_HOST`, `FAKE_THINQ_TOKEN` to require one exact
+token, `FAKE_THINQ_TIME_SCALE=60` to run a dishwasher minute per second).
+
+Set up scenarios with the fake-only endpoints (no auth, bind to localhost only):
+
+```sh
+curl localhost:8090/__fake/requests                     # recorded ThinQ calls
+curl -X POST localhost:8090/__fake/reset                # back to initial state
+# press "remote start" on the dishwasher
+curl -X PATCH localhost:8090/__fake/devices/7d3e9a1c5b2f4e8a9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  -H 'Content-Type: application/json' -d '{"state":{"remoteControlEnable":{"remoteControlEnabled":true}}}'
+# take the fridge offline
+curl -X PATCH localhost:8090/__fake/devices/b2f6c91d0a4e4f5c9e8d7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d \
+  -H 'Content-Type: application/json' -d '{"online":false}'
+```
+
+In tests, use it in-process with a controllable clock:
+
+```ts
+let clock = Date.now();
+const fake = new FakeThinQ({ accessToken: "pat-test", now: () => clock });
+const url = await fake.listen();         // pass as THINQ_API_BASE_URL
+fake.device(DISHWASHER_ID)!.patchState({ remoteControlEnable: { remoteControlEnabled: true } });
+clock += 90 * 60_000;                     // fast-forward the running programme
+fake.requests;                            // what the app sent
+```
+
+The device data and error codes are modelled on the ThinQ Connect docs but are
+not an exact copy of any real model; keep `test/fake-thinq/protocol.ts`
+(`ERRORS`) and `devices.ts` in line with the live API if they drift.

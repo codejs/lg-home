@@ -8,13 +8,17 @@
     "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch --env-file-if-exists=.env src/server/index.ts",
     "dev:web": "vite",
+    "dev:fake": "concurrently -n fake,server,web -c magenta,blue,green \"npm:fake-thinq\" \"npm:dev:server:fake\" \"npm:dev:web\"",
+    "dev:server:fake": "tsx watch --env-file-if-exists=.env --env-file=test/fake-thinq/fake.env src/server/index.ts",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node --env-file-if-exists=.env dist/server/index.js",
     "add_user": "tsx --env-file-if-exists=.env src/server/cli/add-user.ts",
+    "add_user:fake": "tsx --env-file-if-exists=.env --env-file=test/fake-thinq/fake.env src/server/cli/add-user.ts",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.test.json",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "archive": "bash scripts/archive.sh"
+    "archive": "bash scripts/archive.sh",
+    "fake-thinq": "tsx test/fake-thinq/main.ts"
   },
   "repository": {
     "type": "git",

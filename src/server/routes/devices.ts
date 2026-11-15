@@ -52,7 +52,7 @@ export async function deviceRoutes(app: FastifyInstance) {
         .select()
         .from(schema.deviceStates)
         .where(eq(schema.deviceStates.deviceId, req.params.id))
-        .orderBy(desc(schema.deviceStates.recordedAt))
+        .orderBy(desc(schema.deviceStates.recordedAt), desc(schema.deviceStates.id))
         .limit(req.query.limit ?? 50)
         .all();
     },
