@@ -533,6 +533,24 @@ describe("event store", () => {
     assert.deepEqual(store.queryEvents({ limit: 10, deviceId: "'; DROP TABLE events; --" }), []);
   });
 
+  it("jumps to a page with an offset, and counts matching events", () => {
+    const ids = Array.from({ length: 7 }, (_, i) => store.recordEvent({ deviceId: i < 5 ? DISHWASHER_ID : FRIDGE_ID, kind: "event", payload: { i } }).id);
+    assert.deepEqual(store.queryEvents({ limit: 3, offset: 3 }).map((e) => e.id), [ids[3], ids[2], ids[1]]);
+    assert.deepEqual(store.queryEvents({ limit: 3, offset: 6 }).map((e) => e.id), [ids[0]]);
+    assert.deepEqual(store.queryEvents({ limit: 3, offset: 7 }), []);
+    // Pinned below an id, pages don't shift when new events arrive.
+    const pinned = () => store.queryEvents({ limit: 2, offset: 2, beforeId: ids[6] + 1 }).map((e) => e.id);
+    const before = pinned();
+    store.recordEvent({ deviceId: DISHWASHER_ID, kind: "event", payload: {} });
+    assert.deepEqual(pinned(), before);
+
+    assert.equal(store.countEvents({}), 8);
+    assert.equal(store.countEvents({ deviceId: FRIDGE_ID }), 2);
+    assert.equal(store.countEvents({ kind: "control" }), 0);
+    assert.equal(store.countEvents({ beforeId: ids[6] + 1 }), 7);
+    assert.equal(store.countEvents({ deviceId: DISHWASHER_ID, beforeId: ids[2] }), 2);
+  });
+
   it("prunes old state-change events but keeps control records", () => {
     const old = new Date(START - 40 * 24 * 60 * MINUTE);
     store.recordEvent({ deviceId: FRIDGE_ID, kind: "event", payload: { old: true }, createdAt: old });

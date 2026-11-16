@@ -1,0 +1,9 @@
+{
+  // Web (React) tests: the app's web settings plus Node types for node:test.
+  // Also used by tsx (see register.mjs) to compile JSX with the automatic runtime.
+  "extends": "../../tsconfig.web.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node"]
+  },
+  "include": ["../../src/web", "."]
+}

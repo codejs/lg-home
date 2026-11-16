@@ -7,8 +7,35 @@ import { randomBytes } from "node:crypto";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { ThinQClient, ThinQError, type JsonObject } from "../src/server/thinq/client.js";
 import { DISHWASHER_ID, FRIDGE_ID } from "./fake-thinq/devices.js";
-import { ERRORS, THINQ_ERROR_CODES } from "./fake-thinq/protocol.js";
-import { FakeThinQ, THINQ_PUBLIC_API_KEY } from "./fake-thinq/server.js";
+import { ERRORS, THINQ_ERROR_CODES, type DeviceProfile, type Json, type PropSpec } from "./fake-thinq/protocol.js";
+import { FakeThinQ, THINQ_PUBLIC_API_KEY, type ActivityEntry } from "./fake-thinq/server.js";
+
+/** Values in `state` that the profile says the device can't report. */
+function profileViolations(profile: DeviceProfile, state: Json): string[] {
+  const problems: string[] = [];
+  const check = (path: string, spec: PropSpec, value: unknown) => {
+    if (!spec.mode.includes("r")) return;
+    if (spec.type === "number") {
+      if (typeof value !== "number" || !Number.isFinite(value)) problems.push(`${path}=${value}`);
+    } else if (spec.type === "range") {
+      const r = spec.value.r!;
+      if (typeof value !== "number" || value < r.min || value > r.max || (value - r.min) % r.step !== 0) problems.push(`${path}=${value}`);
+    } else if (!(spec.value.r as unknown[]).includes(value)) {
+      problems.push(`${path}=${value}`);
+    }
+  };
+  for (const [resource, spec] of Object.entries(profile.property)) {
+    if (Array.isArray(spec)) {
+      for (const { locationName, ...props } of spec) {
+        const entry = (state[resource] as Json[]).find((e) => e.locationName === locationName)!;
+        for (const [prop, propSpec] of Object.entries(props)) check(`${resource}[${locationName}].${prop}`, propSpec as PropSpec, entry[prop]);
+      }
+    } else {
+      for (const [prop, propSpec] of Object.entries(spec)) check(`${resource}.${prop}`, propSpec, (state[resource] as Json | undefined)?.[prop]);
+    }
+  }
+  return problems;
+}
 
 const MINUTE = 60_000;
 
@@ -25,7 +52,8 @@ async function rejectsWith(promise: Promise<unknown>, status: number, code: stri
 
 describe("fake ThinQ API", () => {
   let clock = Date.parse("2026-01-01T08:00:00Z");
-  const fake = new FakeThinQ({ accessToken: "pat-test", now: () => clock });
+  // Seeded so simulated activity is the same on every run (no timer: stepped explicitly).
+  const fake = new FakeThinQ({ accessToken: "pat-test", now: () => clock, activity: { seed: 1 } });
   let client: ThinQClient;
 
   const headers = (overrides: Record<string, string | undefined> = {}) => {
@@ -363,6 +391,189 @@ describe("fake ThinQ API", () => {
       assert.equal((await fetch(`${fake.url}/__fake/faults`, { method: "DELETE" })).status, 200);
       assert.deepEqual(await (await fetch(`${fake.url}/__fake/faults`)).json(), []);
       await client.getDevices();
+    });
+  });
+
+  describe("simulated activity", () => {
+    /** Step one device until it does `action`, letting time pass so programmes finish. */
+    const stepUntil = (deviceId: string, action: RegExp): ActivityEntry => {
+      for (let i = 0; i < 500; i++) {
+        const [entry] = fake.stepActivity(deviceId);
+        if (entry && action.test(entry.action)) return entry;
+        clock += 10 * MINUTE;
+      }
+      throw new Error(`never saw ${action}`);
+    };
+    const fridgeDoor = () => ((fake.device(FRIDGE_ID)!.snapshot(clock).doorStatus as Json[])[0].doorState);
+    const dishwasher = () => fake.device(DISHWASHER_ID)!.snapshot(clock);
+
+    it("is off unless asked for", () => {
+      assert.equal(fake.activityRunning, false);
+      assert.deepEqual(fake.activityLog, []);
+    });
+
+    it("only ever produces states the device profiles allow", () => {
+      const seen = new Set<string>();
+      for (let i = 0; i < 1000; i++) {
+        for (const entry of fake.stepActivity()) seen.add(`${entry.alias}: ${entry.action.replace(/-?\d+/g, "N")}`);
+        clock += 3 * MINUTE;
+        for (const device of fake.devices) {
+          assert.deepEqual(profileViolations(device.profile, device.snapshot(clock)), [], `${device.deviceInfo.alias} after step ${i}`);
+        }
+      }
+      // Every behaviour came up.
+      assert.deepEqual([...seen].sort(), [
+        "Dishwasher: QUICK programme started at the panel",
+        "Dishwasher: TURBO programme started at the panel",
+        "Dishwasher: door closed",
+        "Dishwasher: door opened",
+        "Dishwasher: remote start enabled at the panel",
+        "Kitchen Fridge: door closed",
+        "Kitchen Fridge: door opened",
+        "Kitchen Fridge: express fridge finished",
+        "Kitchen Fridge: express fridge switched on at the panel",
+        "Kitchen Fridge: fridge set to N °C at the panel",
+      ]);
+    });
+
+    it("is reproducible with a seed", () => {
+      const run = (seed: number) => {
+        const f = new FakeThinQ({ now: () => clock, activity: { intervalMs: 60_000, seed } });
+        return Array.from({ length: 50 }, () => f.stepActivity().map((e) => `${e.alias}: ${e.action}`)).flat();
+      };
+      assert.deepEqual(run(42), run(42));
+      assert.notDeepEqual(run(42), run(43));
+      assert.throws(() => new FakeThinQ({ activity: { seed: 1 } }).startActivity(50), /activity interval/);
+    });
+
+    it("closes a door it opened on the next step", () => {
+      stepUntil(FRIDGE_ID, /^door opened$/);
+      assert.equal(fridgeDoor(), "OPEN");
+      assert.equal(fake.stepActivity(FRIDGE_ID)[0].action, "door closed");
+      assert.equal(fridgeDoor(), "CLOSE");
+    });
+
+    it("switches express fridge off by itself after a while", () => {
+      stepUntil(FRIDGE_ID, /express fridge switched on/);
+      assert.equal((fake.device(FRIDGE_ID)!.snapshot(clock).refrigeration as Json).expressFridge, true);
+      stepUntil(FRIDGE_ID, /express fridge finished/);
+      assert.equal((fake.device(FRIDGE_ID)!.snapshot(clock).refrigeration as Json).expressFridge, false);
+    });
+
+    it("only opens and closes the door of a fridge in sabbath mode", () => {
+      fake.device(FRIDGE_ID)!.patchState({ sabbath: { sabbathMode: true } });
+      const actions = new Set(Array.from({ length: 100 }, () => fake.stepActivity(FRIDGE_ID)[0]?.action));
+      assert.deepEqual([...actions].sort(), ["door closed", "door opened"]);
+    });
+
+    it("runs a programme started at the panel to the end, leaving it alone meanwhile", () => {
+      const started = stepUntil(DISHWASHER_ID, /programme started/);
+      const course = started.action.split(" ")[0];
+      assert.equal((dishwasher().runState as Json).currentState, "RUNNING");
+      assert.equal((dishwasher().dishWashingCourse as Json).currentDishWashingCourse, course);
+      for (let i = 0; i < 20; i++) assert.deepEqual(fake.stepActivity(DISHWASHER_ID), [], "nothing happens while running");
+
+      clock += (course === "QUICK" ? 30 : 60) * MINUTE;
+      assert.equal((dishwasher().runState as Json).currentState, "END");
+    });
+
+    it("enables remote start at the panel, which lets the app start a programme", async () => {
+      stepUntil(DISHWASHER_ID, /remote start enabled/);
+      await client.controlDevice(DISHWASHER_ID, { operation: { dishWasherOperationMode: "START" } });
+      assert.equal((dishwasher().runState as Json).currentState, "RUNNING");
+    });
+
+    it("cancels remote start when the dishwasher door is opened", () => {
+      fake.device(DISHWASHER_ID)!.patchState({ remoteControlEnable: { remoteControlEnabled: true } });
+      stepUntil(DISHWASHER_ID, /door opened/);
+      assert.deepEqual(dishwasher().remoteControlEnable, { remoteControlEnabled: false });
+    });
+
+    it("powers a switched-off dishwasher back on", async () => {
+      await client.controlDevice(DISHWASHER_ID, { operation: { dishWasherOperationMode: "POWER_OFF" } });
+      assert.equal(fake.stepActivity(DISHWASHER_ID)[0].action, "powered on at the panel");
+      assert.equal((dishwasher().runState as Json).currentState, "INITIAL");
+    });
+
+    it("leaves disconnected appliances alone", () => {
+      fake.device(FRIDGE_ID)!.online = false;
+      for (let i = 0; i < 50; i++) assert.deepEqual(fake.stepActivity(FRIDGE_ID), []);
+      fake.device(FRIDGE_ID)!.online = true;
+      assert.equal(fridgeDoor(), "CLOSE");
+    });
+
+    it("logs what happened, keeping the last 200 actions, until reset", () => {
+      for (let i = 0; i < 400; i++) fake.stepActivity(FRIDGE_ID);
+      assert.equal(fake.activityLog.length, 200);
+      const last = fake.activityLog.at(-1)!;
+      assert.equal(last.deviceId, FRIDGE_ID);
+      assert.equal(last.alias, "Kitchen Fridge");
+      assert.equal(last.at, new Date(clock).toISOString(), "stamped with the fake clock");
+      fake.reset();
+      assert.deepEqual(fake.activityLog, []);
+    });
+
+    it("refuses unknown devices and nonsensical intervals", () => {
+      assert.throws(() => fake.stepActivity("nope"), /Unknown fake device/);
+      for (const intervalMs of [0, 99, -1, NaN, Infinity, 60 * 60_000 + 1]) {
+        assert.throws(() => new FakeThinQ({ activity: { intervalMs } }), /activity interval/, String(intervalMs));
+        assert.throws(() => fake.startActivity(intervalMs), /activity interval/, String(intervalMs));
+      }
+    });
+
+    it("runs on its own once listening, and stops on close", async () => {
+      const seen: ActivityEntry[] = [];
+      const live = new FakeThinQ({ activity: { intervalMs: 100, seed: 7 }, onActivity: (e) => seen.push(e) });
+      assert.equal(live.activityRunning, false, "not before listen()");
+      await live.listen();
+      try {
+        assert.equal(live.activityRunning, true);
+        await new Promise((r) => setTimeout(r, 450));
+        assert.ok(seen.length >= 3, `only ${seen.length} actions`);
+        assert.deepEqual(seen, live.activityLog);
+      } finally {
+        await live.close();
+      }
+      assert.equal(live.activityRunning, false);
+      const count = seen.length;
+      await new Promise((r) => setTimeout(r, 250));
+      assert.equal(seen.length, count);
+    });
+
+    it("can be driven over HTTP", async () => {
+      const call = async (method: string, path: string, body?: unknown) => {
+        const res = await fetch(`${fake.url}/__fake/activity${path}`, {
+          method,
+          headers: body === undefined ? {} : { "Content-Type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        return { status: res.status, body: await res.json() };
+      };
+
+      assert.deepEqual((await call("GET", "")).body, { running: false, intervalMs: null, log: [] });
+
+      const step = await call("POST", "/step", { deviceId: FRIDGE_ID });
+      assert.equal(step.status, 200);
+      assert.ok(step.body.every((e: ActivityEntry) => e.deviceId === FRIDGE_ID));
+      assert.equal((await call("POST", "/step")).status, 200);
+      assert.equal((await call("POST", "/step", { deviceId: "nope" })).status, 404);
+      assert.equal((await call("POST", "/step", { deviceId: 5 })).status, 400);
+      assert.equal((await call("GET", "/step")).status, 404);
+
+      for (const bad of [{ running: "yes" }, { intervalSeconds: 0 }, { intervalSeconds: "5" }, { intervalSeconds: 3601 }, { running: true }]) {
+        assert.equal((await call("PATCH", "", bad)).status, 400, JSON.stringify(bad));
+      }
+      assert.equal(fake.activityRunning, false);
+
+      const started = await call("PATCH", "", { running: true, intervalSeconds: 30 });
+      assert.equal(started.status, 200);
+      assert.equal(started.body.running, true);
+      assert.equal(started.body.intervalMs, 30_000);
+      const stopped = await call("PATCH", "", { running: false });
+      assert.deepEqual([stopped.body.running, stopped.body.intervalMs], [false, 30_000]);
+      assert.equal(fake.activityRunning, false);
+      assert.equal((await call("PATCH", "", { running: true })).body.running, true, "restarts with the last interval");
+      fake.stopActivity();
     });
   });
 

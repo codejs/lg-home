@@ -2,7 +2,7 @@
  * Persistence for device events and subscriptions, plus an in-process bus that
  * tells live listeners (the SSE stream) about every event stored.
  */
-import { and, asc, desc, eq, gt, lt, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, lt, type SQL } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { diffState, type Json } from "./diff.js";
 
@@ -60,23 +60,35 @@ export interface EventQuery {
   beforeId?: number;
   /** Only events with a larger id (catching up), returned oldest first. */
   afterId?: number;
+  /** Skip this many matching events first (jumping to a page). */
+  offset?: number;
   limit: number;
 }
 
-/** Events newest first, or oldest first when `afterId` is given. */
-export function queryEvents(q: EventQuery): StoredEvent[] {
+function eventConditions(q: Pick<EventQuery, "deviceId" | "kind" | "beforeId" | "afterId">): SQL | undefined {
   const where: SQL[] = [];
   if (q.deviceId !== undefined) where.push(eq(schema.events.deviceId, q.deviceId));
   if (q.kind !== undefined) where.push(eq(schema.events.kind, q.kind));
   if (q.beforeId !== undefined) where.push(lt(schema.events.id, q.beforeId));
   if (q.afterId !== undefined) where.push(gt(schema.events.id, q.afterId));
+  return and(...where);
+}
+
+/** Events newest first, or oldest first when `afterId` is given. */
+export function queryEvents(q: EventQuery): StoredEvent[] {
   return db
     .select()
     .from(schema.events)
-    .where(and(...where))
+    .where(eventConditions(q))
     .orderBy(q.afterId !== undefined ? asc(schema.events.id) : desc(schema.events.id))
     .limit(q.limit)
+    .offset(q.offset ?? 0)
     .all();
+}
+
+/** How many events match (same filters as queryEvents, without paging). */
+export function countEvents(q: Pick<EventQuery, "deviceId" | "kind" | "beforeId">): number {
+  return db.select({ total: count() }).from(schema.events).where(eventConditions(q)).get()?.total ?? 0;
 }
 
 /** Delete state-change events older than `before`. Control records are an audit trail and are kept. */

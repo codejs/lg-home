@@ -14,6 +14,15 @@
  *   GET    /__fake/faults          -> pending injected faults
  *   POST   /__fake/faults          -> { error: "EXCEEDED_API_CALLS", method?, path?, times?: n | "always" }
  *   DELETE /__fake/faults          -> clear injected faults
+ *   GET    /__fake/activity        -> simulated appliance activity: { running, intervalMs, log }
+ *   POST   /__fake/activity/step   -> one step now: { deviceId? } -> what happened
+ *   PATCH  /__fake/activity        -> { running?: boolean, intervalSeconds?: number }
+ *
+ * Simulated activity: with `activity` set, the fake appliances are "used" on
+ * their own every interval (doors open and close, programmes start, ...), so
+ * their state changes without scripting - and an app watching them sees
+ * device events. Off by default in-process, so tests stay deterministic; step
+ * it explicitly with `stepActivity()`.
  *
  * Use in-process (`new FakeThinQ().listen()`) or standalone (`npm run fake-thinq`).
  */
@@ -40,7 +49,33 @@ export interface FakeThinQOptions {
   timeScale?: number;
   /** Called once per handled request, e.g. for console logging. */
   onRequest?: (entry: RecordedRequest) => void;
+  /** Simulate people using the appliances; see {@link ActivityOptions}. */
+  activity?: ActivityOptions;
+  /** Called for every simulated action, e.g. for console logging. */
+  onActivity?: (entry: ActivityEntry) => void;
 }
+
+export interface ActivityOptions {
+  /**
+   * Real time between steps, once listening; each step gives every appliance
+   * a chance to act. Without it, activity only happens via `stepActivity()`.
+   */
+  intervalMs?: number;
+  /** Seed for the pseudo-random choices, for reproducible runs. */
+  seed?: number;
+}
+
+export interface ActivityEntry {
+  /** Fake-clock time of the action. */
+  at: string;
+  deviceId: string;
+  alias: string;
+  action: string;
+}
+
+const MAX_ACTIVITY_LOG = 200;
+export const MIN_ACTIVITY_INTERVAL_MS = 100;
+export const MAX_ACTIVITY_INTERVAL_MS = 60 * 60_000;
 
 export interface RecordedRequest {
   method: string;
@@ -79,6 +114,11 @@ export class FakeThinQ {
   readonly requests: RecordedRequest[] = [];
   private readonly seenMessageIds = new Set<string>();
   private faults: Fault[] = [];
+  /** Recent simulated actions, oldest first. */
+  readonly activityLog: ActivityEntry[] = [];
+  private activityIntervalMs: number | null;
+  private activityTimer: NodeJS.Timeout | null = null;
+  private readonly random: () => number;
   private readonly server: Server;
   private readonly now: () => number;
 
@@ -90,6 +130,8 @@ export class FakeThinQ {
       const origin = Date.now();
       this.now = () => origin + (Date.now() - origin) * scale;
     }
+    this.activityIntervalMs = options.activity?.intervalMs !== undefined ? checkActivityInterval(options.activity.intervalMs) : null;
+    this.random = mulberry32(options.activity?.seed ?? Date.now());
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((err) => {
         this.send(res, 500, { error: { code: "0000", message: String(err) } });
@@ -101,7 +143,10 @@ export class FakeThinQ {
   listen(port = 0, host = "127.0.0.1"): Promise<string> {
     return new Promise((resolve, reject) => {
       this.server.once("error", reject);
-      this.server.listen(port, host, () => resolve(this.url));
+      this.server.listen(port, host, () => {
+        if (this.activityIntervalMs !== null) this.startActivity(this.activityIntervalMs);
+        resolve(this.url);
+      });
     });
   }
 
@@ -111,16 +156,55 @@ export class FakeThinQ {
   }
 
   close(): Promise<void> {
+    this.stopActivity();
     this.server.closeAllConnections();
     return new Promise((resolve) => this.server.close(() => resolve()));
   }
 
-  /** Back to the initial device state, with an empty request log and no faults. */
+  /** Back to the initial device state, with an empty request log, no faults and an empty activity log. */
   reset(): void {
     for (const device of this.devices) device.reset();
     this.requests.length = 0;
     this.seenMessageIds.clear();
     this.faults = [];
+    this.activityLog.length = 0;
+  }
+
+  /**
+   * One step of simulated activity: every appliance (or just `deviceId`) gets
+   * a chance to act. Returns what happened.
+   */
+  stepActivity(deviceId?: string): ActivityEntry[] {
+    const devices = deviceId === undefined ? this.devices : this.devices.filter((d) => d.deviceId === deviceId);
+    if (deviceId !== undefined && devices.length === 0) throw new Error(`Unknown fake device: ${deviceId}`);
+    const entries: ActivityEntry[] = [];
+    for (const device of devices) {
+      const action = device.simulate(this.random, this.now());
+      if (!action) continue;
+      const entry = { at: new Date(this.now()).toISOString(), deviceId: device.deviceId, alias: device.deviceInfo.alias, action };
+      entries.push(entry);
+      this.activityLog.push(entry);
+      if (this.activityLog.length > MAX_ACTIVITY_LOG) this.activityLog.shift();
+      this.options.onActivity?.(entry);
+    }
+    return entries;
+  }
+
+  /** Run `stepActivity()` every `intervalMs` of real time until stopped. */
+  startActivity(intervalMs: number): void {
+    this.activityIntervalMs = checkActivityInterval(intervalMs);
+    this.stopActivity();
+    this.activityTimer = setInterval(() => this.stepActivity(), this.activityIntervalMs);
+    this.activityTimer.unref();
+  }
+
+  stopActivity(): void {
+    if (this.activityTimer) clearInterval(this.activityTimer);
+    this.activityTimer = null;
+  }
+
+  get activityRunning(): boolean {
+    return this.activityTimer !== null;
   }
 
   /** Make upcoming matching requests fail; see {@link FaultSpec}. */
@@ -241,6 +325,7 @@ export class FakeThinQ {
       return this.send(res, 200, { ok: true });
     }
     if (path === "/__fake/faults") return this.handleFaults(method, body, res);
+    if (path === "/__fake/activity" || path === "/__fake/activity/step") return this.handleActivity(method, path, body, res);
     const match = /^\/__fake\/devices\/([^/]+)$/.exec(path);
     if (method === "PATCH" && match) {
       const device = this.device(decodeURIComponent(match[1]));
@@ -251,6 +336,40 @@ export class FakeThinQ {
       return this.send(res, 200, { online: device.online, state: device.snapshot(this.now()) });
     }
     this.send(res, 404, { error: `No such scenario endpoint: ${method} ${path}` });
+  }
+
+  private handleActivity(method: string, path: string, body: unknown, res: ServerResponse): void {
+    const status = () => ({ running: this.activityRunning, intervalMs: this.activityIntervalMs, log: this.activityLog });
+    if (path === "/__fake/activity/step") {
+      if (method !== "POST") return this.send(res, 404, { error: `No such scenario endpoint: ${method} ${path}` });
+      const deviceId = (body as { deviceId?: unknown } | undefined)?.deviceId;
+      if (deviceId !== undefined && typeof deviceId !== "string") return this.send(res, 400, { error: "deviceId must be a string" });
+      if (deviceId !== undefined && !this.device(deviceId)) return this.send(res, 404, { error: "unknown device" });
+      return this.send(res, 200, this.stepActivity(deviceId));
+    }
+    if (method === "GET") return this.send(res, 200, status());
+    if (method !== "PATCH") return this.send(res, 404, { error: `No such scenario endpoint: ${method} ${path}` });
+
+    const patch = (body ?? {}) as { running?: unknown; intervalSeconds?: unknown };
+    if (patch.running !== undefined && typeof patch.running !== "boolean") return this.send(res, 400, { error: "running must be a boolean" });
+    let intervalMs = this.activityIntervalMs;
+    if (patch.intervalSeconds !== undefined) {
+      const ms = typeof patch.intervalSeconds === "number" ? patch.intervalSeconds * 1000 : NaN;
+      if (!(ms >= MIN_ACTIVITY_INTERVAL_MS && ms <= MAX_ACTIVITY_INTERVAL_MS)) {
+        return this.send(res, 400, {
+          error: `intervalSeconds must be between ${MIN_ACTIVITY_INTERVAL_MS / 1000} and ${MAX_ACTIVITY_INTERVAL_MS / 1000}`,
+        });
+      }
+      intervalMs = ms;
+    }
+    const running = patch.running ?? this.activityRunning;
+    if (running && intervalMs === null) return this.send(res, 400, { error: "intervalSeconds is required to start activity" });
+    if (running) this.startActivity(intervalMs!);
+    else {
+      this.stopActivity();
+      this.activityIntervalMs = intervalMs;
+    }
+    this.send(res, 200, status());
   }
 
   private handleFaults(method: string, body: unknown, res: ServerResponse): void {
@@ -322,4 +441,23 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   } catch {
     throw new FakeThinQError("BAD_REQUEST", "Request body is not valid JSON");
   }
+}
+
+function checkActivityInterval(intervalMs: number): number {
+  if (!(Number.isFinite(intervalMs) && intervalMs >= MIN_ACTIVITY_INTERVAL_MS && intervalMs <= MAX_ACTIVITY_INTERVAL_MS)) {
+    throw new Error(`activity interval must be between ${MIN_ACTIVITY_INTERVAL_MS} and ${MAX_ACTIVITY_INTERVAL_MS} ms`);
+  }
+  return intervalMs;
+}
+
+/** Small seeded PRNG (mulberry32): reproducible "random" activity. Returns [0, 1). */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }

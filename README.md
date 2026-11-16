@@ -18,11 +18,18 @@ npm run dev                 # API on :3000, SPA on http://localhost:5173
 
 Production: `npm run build && npm start` (serves the API and SPA on :3000).
 
-Tests: `npm test` runs unit tests for the ThinQ client and the
-[device events](#device-events) pipeline (state diff, settings, poller, event
-streams), contract tests for the [fake ThinQ API](#fake-thinq-api), and
-integration tests that boot the server against the fake (no network or real
-account needed). `npm run typecheck` checks server, web and test code.
+Tests: `npm test` runs both suites (no network or real account needed):
+
+- `npm run test:server` - unit tests for the ThinQ client and the
+  [device events](#device-events) pipeline (state diff, settings, poller, event
+  streams), contract tests for the [fake ThinQ API](#fake-thinq-api), and
+  integration tests that boot the server against the fake.
+- `npm run test:web` - tests for the React app with jsdom and Testing Library:
+  event formatting, the live event stream, and the devices and events screens
+  driven like a user would, against a fake of the server API
+  (`test/web/helpers.tsx`).
+
+`npm run typecheck` checks server, web and test code.
 
 The project `.npmrc` sets `ignore-scripts=true`: better-sqlite3 ships prebuilt
 binaries, but npm would otherwise run a no-op `node-gyp rebuild` that downloads
@@ -86,7 +93,8 @@ recorded as events too.
 | `GET /api/subscriptions` | Subscribed devices (last poll, last change, last error) and the poller status (`idle` / `paused`) |
 | `PUT /api/devices/:id/subscription` | Subscribe (`201`; `200` if already subscribed). The first poll only records a baseline |
 | `DELETE /api/devices/:id/subscription` | Unsubscribe (`204`); past events are kept |
-| `GET /api/events?deviceId=&kind=&before=&limit=` | History, newest first. `kind` is `event` (state change) or `control`; page with `before` = smallest id seen; `limit` up to 200 |
+| `GET /api/events?deviceId=&kind=&before=&offset=&limit=` | History, newest first. `kind` is `event` (state change) or `control`; page with `before` = smallest id seen, or jump with `offset` (up to 100,000; combine with a fixed `before` for pages that don't shift); `limit` up to 200 |
+| `GET /api/events/count?deviceId=&kind=&before=` | `{ total }`: how many events match, for page counts |
 | `GET /api/events/stream?deviceId=&kind=` | Live events as [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events); reconnecting clients send `Last-Event-ID` and get up to 500 missed events |
 
 A state-change event looks like this; `report` is the changed part of the state
@@ -105,6 +113,19 @@ A state-change event looks like this; `report` is the changed part of the state
 
 Location-based resources are matched by `locationName`, e.g.
 `temperature[FREEZER].targetTemperature`.
+
+**In the app.** Open a device and choose *Watch state changes*; watched
+devices are marked *Watching*. The device panel shows when it was last
+checked, the last error and its latest events, and its status updates as
+events arrive. The *Events* tab lists all events newest first, filtered by
+device and type, a page at a time (10, 25, 50 or 100 per page, with numbered
+pages and *Newer* / *Older*), with each event's full data under *Details*.
+The first page is live: new events appear on top. Older pages stay put while
+new events arrive (they are pinned below the newest event you had seen), and a
+notice says how many newer events there are, with a button back to the
+newest. New events appear live (the indicator shows *Live*,
+*Reconnecting…* or *Disconnected*); the app keeps one stream open, reconnects
+after interruptions and returns to the login page when the session has ended.
 
 **Polling and the ThinQ call budget.** `EVENT_POLL_INTERVAL_SECONDS` (default 60)
 sets the interval. Every poll is one ThinQ call per subscribed device, and
@@ -162,7 +183,25 @@ npm run dev:fake                 # fake ThinQ on :8090 + API on :3000 + SPA on :
 server at the fake and uses `data/lg-home-fake.db` so fake devices never mix
 with real ones. To run only the fake: `npm run fake-thinq` (options:
 `FAKE_THINQ_PORT`, `FAKE_THINQ_HOST`, `FAKE_THINQ_TOKEN` to require one exact
-token, `FAKE_THINQ_TIME_SCALE=60` to run a dishwasher minute per second).
+token, `FAKE_THINQ_TIME_SCALE=60` to run a dishwasher minute per second,
+`FAKE_THINQ_ACTIVITY_SECONDS` and `FAKE_THINQ_SEED`, see below).
+
+**Simulated activity.** The standalone fake "uses" its appliances on its own,
+every 15 s by default (`FAKE_THINQ_ACTIVITY_SECONDS`; `0` turns it off), like
+people in a home would. So with `dev:fake`, watching a device in the app
+produces device events without any scripting: the first ones arrive within
+about 20 s. The actions (logged by the fake as `activity: ...`):
+
+| Appliance | What happens |
+| --- | --- |
+| Kitchen Fridge | Door opens, and closes again on the next step; express fridge is switched on at the panel and switches itself off a few steps later; the fridge compartment is set a degree up or down (1–7 °C). In sabbath mode only the door moves |
+| Dishwasher | Door opens (which cancels remote start, as on LG dishwashers) and closes again; remote start is enabled at the panel, so the app can start it; a QUICK or TURBO programme is started at the panel and runs to the end (use `FAKE_THINQ_TIME_SCALE` to speed it up); a dishwasher switched off from the app is powered on again. Nothing else happens while a programme runs |
+
+Simulated actions only produce states the device profiles allow, and a
+disconnected appliance does nothing. The fake can't see which devices the app
+watches (subscriptions live in the app's server; ThinQ is only polled), so
+every appliance is active and the app decides which changes become events.
+`FAKE_THINQ_SEED=<integer>` makes the sequence of actions repeatable.
 
 Set up scenarios with the fake-only endpoints (no auth, bind to localhost only):
 
@@ -181,6 +220,12 @@ curl -X POST localhost:8090/__fake/faults \
   -H 'Content-Type: application/json' -d '{"error":"EXCEEDED_API_CALLS","times":"always"}'
 curl localhost:8090/__fake/faults                       # faults not used up yet
 curl -X DELETE localhost:8090/__fake/faults             # clear them
+# simulated activity: status and recent actions, one step now (all or one device), pause/resume/retime
+curl localhost:8090/__fake/activity
+curl -X POST localhost:8090/__fake/activity/step -H 'Content-Type: application/json' \
+  -d '{"deviceId":"b2f6c91d0a4e4f5c9e8d7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d"}'
+curl -X PATCH localhost:8090/__fake/activity -H 'Content-Type: application/json' -d '{"running":false}'
+curl -X PATCH localhost:8090/__fake/activity -H 'Content-Type: application/json' -d '{"running":true,"intervalSeconds":5}'
 ```
 
 Patching state, the dishwasher's programme running out and control commands
@@ -199,6 +244,12 @@ clock += 90 * 60_000;                     // fast-forward the running programme
 fake.injectFault({ error: "EXCEEDED_API_CALLS", path: /\/state$/, times: 3 });
 fake.requests;                            // what the app sent
 ```
+
+In-process, simulated activity is off unless you ask for it: pass
+`activity: { seed: 1 }` and call `fake.stepActivity()` (or
+`fake.stepActivity(deviceId)`) to make things happen deterministically, or add
+`intervalMs` to run it on a timer once listening. `fake.activityLog` lists what
+happened.
 
 `test/helpers/app-server.ts` starts the real server as a child process against
 the fake and has a small Server-Sent Events client, for integration tests like

@@ -10,7 +10,16 @@ import { eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { sessionTokenOf } from "../auth.js";
 import type { EventPoller } from "../events/poller.js";
-import { EVENT_KINDS, getSubscription, listSubscriptions, queryEvents, subscribe, unsubscribe, type EventKind } from "../events/store.js";
+import {
+  EVENT_KINDS,
+  countEvents,
+  getSubscription,
+  listSubscriptions,
+  queryEvents,
+  subscribe,
+  unsubscribe,
+  type EventKind,
+} from "../events/store.js";
 import { canOpenStream, serveStream } from "../events/streams.js";
 
 export interface EventRoutesOptions {
@@ -25,6 +34,8 @@ const deviceParams = {
 } as const;
 
 export const MAX_PAGE_SIZE = 200;
+/** Deepest page reachable by offset; bounds the cost of a query. */
+export const MAX_OFFSET = 100_000;
 
 /** `Last-Event-ID` as sent by EventSource: a plain non-negative integer. */
 function parseLastEventId(raw: string | string[] | undefined): number | undefined | null {
@@ -71,8 +82,12 @@ export async function eventRoutes(app: FastifyInstance, { poller }: EventRoutesO
     },
   );
 
-  /** Event history, newest first. Page backwards with `before` = the smallest id seen. */
-  app.get<{ Querystring: { deviceId?: string; kind?: EventKind; before?: number; limit?: number } }>(
+  /**
+   * Event history, newest first. Page backwards with `before` = the smallest
+   * id seen, or jump to a page with `offset`. Numbered pages stay stable while
+   * new events arrive when `before` pins them below a fixed id.
+   */
+  app.get<{ Querystring: { deviceId?: string; kind?: EventKind; before?: number; offset?: number; limit?: number } }>(
     "/api/events",
     {
       schema: {
@@ -82,6 +97,7 @@ export async function eventRoutes(app: FastifyInstance, { poller }: EventRoutesO
             deviceId: DEVICE_ID,
             kind: { type: "string", enum: EVENT_KINDS },
             before: { type: "integer", minimum: 1 },
+            offset: { type: "integer", minimum: 0, maximum: MAX_OFFSET },
             limit: { type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE },
           },
           additionalProperties: false,
@@ -89,8 +105,30 @@ export async function eventRoutes(app: FastifyInstance, { poller }: EventRoutesO
       },
     },
     async (req) => {
-      const { deviceId, kind, before, limit } = req.query;
-      return queryEvents({ deviceId, kind, beforeId: before, limit: limit ?? 50 });
+      const { deviceId, kind, before, offset, limit } = req.query;
+      return queryEvents({ deviceId, kind, beforeId: before, offset, limit: limit ?? 50 });
+    },
+  );
+
+  /** How many events match the same filters as the history (for "page 2 of 9"). */
+  app.get<{ Querystring: { deviceId?: string; kind?: EventKind; before?: number } }>(
+    "/api/events/count",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          properties: {
+            deviceId: DEVICE_ID,
+            kind: { type: "string", enum: EVENT_KINDS },
+            before: { type: "integer", minimum: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (req) => {
+      const { deviceId, kind, before } = req.query;
+      return { total: countEvents({ deviceId, kind, beforeId: before }) };
     },
   );
 

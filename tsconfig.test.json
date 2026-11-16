@@ -4,5 +4,6 @@
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["src/server", "test"]
+  "include": ["src/server", "test"],
+  "exclude": ["test/web"]
 }

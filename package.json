@@ -4,7 +4,9 @@
   "description": "A webapp for controlling LG home appliance",
   "main": "dist/server/index.js",
   "scripts": {
-    "test": "node --import tsx --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "test": "npm run test:server && npm run test:web",
+    "test:server": "node --import tsx --test --test-reporter=spec \"test/*.test.ts\"",
+    "test:web": "node --import ./test/web/register.mjs --test --test-reporter=spec \"test/web/**/*.test.ts\" \"test/web/**/*.test.tsx\"",
     "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch --env-file-if-exists=.env src/server/index.ts",
     "dev:web": "vite",
@@ -14,7 +16,7 @@
     "start": "node --env-file-if-exists=.env dist/server/index.js",
     "add_user": "tsx --env-file-if-exists=.env src/server/cli/add-user.ts",
     "add_user:fake": "tsx --env-file-if-exists=.env --env-file=test/fake-thinq/fake.env src/server/cli/add-user.ts",
-    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.test.json && tsc -p test/web/tsconfig.json --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "archive": "bash scripts/archive.sh",
@@ -46,6 +48,9 @@
     "react-dom": "19.3.1"
   },
   "devDependencies": {
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.9",
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "22.20.5",
     "@types/react": "19.3.0",
@@ -53,6 +58,8 @@
     "@vitejs/plugin-react": "6.3.0",
     "concurrently": "10.0.7",
     "drizzle-kit": "0.31.11",
+    "global-jsdom": "29.0.0",
+    "jsdom": "29.0.1",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vite": "8.3.8"

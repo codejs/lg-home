@@ -22,7 +22,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("device events over the HTTP API", () => {
   let clock = Date.parse("2026-01-01T08:00:00Z");
-  const fake = new FakeThinQ({ accessToken: "pat-test", now: () => clock });
+  // Seeded activity, stepped explicitly by the tests (no timer).
+  const fake = new FakeThinQ({ accessToken: "pat-test", now: () => clock, activity: { seed: 3 } });
   let server: AppServer;
   let alice: ApiClient;
   let anonymous: ApiClient;
@@ -57,6 +58,7 @@ describe("device events over the HTTP API", () => {
       assert.equal((await anonymous.request(`/api/devices/${FRIDGE_ID}/subscription`, { method: "PUT" })).status, 401);
       assert.equal((await anonymous.request(`/api/devices/${FRIDGE_ID}/subscription`, { method: "DELETE" })).status, 401);
       assert.equal((await anonymous.request("/api/events")).status, 401);
+      assert.equal((await anonymous.request("/api/events/count")).status, 401);
       const stream = await anonymous.stream();
       assert.equal(stream.status, 401);
       const forged = await anonymous.stream("/api/events/stream", { Cookie: "lg_home_session=forged" });
@@ -76,8 +78,11 @@ describe("device events over the HTTP API", () => {
       const long = "x".repeat(257);
       // Fastify refuses path parameters over 100 characters before routing.
       assert.equal((await alice.request(`/api/devices/${long}/subscription`, { method: "PUT" })).status, 414);
-      for (const query of ["kind=push", "kind=", "limit=0", "limit=201", "limit=abc", "before=0", "before=-1", `deviceId=${long}`]) {
+      for (const query of ["kind=push", "kind=", "limit=0", "limit=201", "limit=abc", "before=0", "before=-1", `deviceId=${long}`, "offset=-1", "offset=1.5", "offset=100001", "offset=x"]) {
         assert.equal((await alice.request(`/api/events?${query}`)).status, 400, query);
+      }
+      for (const query of ["kind=push", "before=0", "before=x", `deviceId=${long}`]) {
+        assert.equal((await alice.request(`/api/events/count?${query}`)).status, 400, query);
       }
       // Unknown parameters are stripped by validation (Fastify's default), never used.
       assert.equal((await alice.request("/api/events?unknown=1")).status, 200);
@@ -170,6 +175,15 @@ describe("device events over the HTTP API", () => {
       const page2 = (await alice.request(`/api/events?deviceId=${DISHWASHER_ID}&limit=2&before=${page1[1].id}`)).body;
       assert.deepEqual([...page1, ...page2].map((e: { id: number }) => e.id), ids.slice(0, 4));
       assert.deepEqual((await alice.request(`/api/events?deviceId=${FRIDGE_ID}`)).body, []);
+
+      // Numbered pages: offset + a count, pinned below the newest id.
+      const pin = ids[0] + 1;
+      const third = (await alice.request(`/api/events?deviceId=${DISHWASHER_ID}&limit=1&offset=2&before=${pin}`)).body;
+      assert.deepEqual(third.map((e: { id: number }) => e.id), [ids[2]]);
+      assert.deepEqual((await alice.request(`/api/events/count?deviceId=${DISHWASHER_ID}`)).body, { total: all.length });
+      assert.deepEqual((await alice.request(`/api/events/count?deviceId=${DISHWASHER_ID}&before=${ids[1]}`)).body, { total: all.length - 2 });
+      assert.deepEqual((await alice.request(`/api/events/count?kind=control`)).body, { total: 1 });
+      assert.deepEqual((await alice.request(`/api/events/count?deviceId=${FRIDGE_ID}`)).body, { total: 0 });
     });
 
     it("replays missed events to a reconnecting client (Last-Event-ID)", async () => {
@@ -297,6 +311,47 @@ describe("device events over the HTTP API", () => {
     });
   });
 
+  describe("simulated appliance activity", () => {
+    /** Where each simulated action shows up in a device's state. */
+    const pathOf = (action: string) =>
+      action.startsWith("door")
+        ? /^doorStatus(\[MAIN\])?\.doorState$/
+        : action.startsWith("express")
+          ? /^refrigeration\.expressFridge$/
+          : action.startsWith("fridge set")
+            ? /^temperature\[FRIDGE\]\.targetTemperature$/
+            : action.startsWith("remote start")
+              ? /^remoteControlEnable\.remoteControlEnabled$/
+              : /^runState\.currentState$/;
+
+    it("turns what happens at a watched appliance into live events", async () => {
+      const stream = await alice.stream();
+      try {
+        await stream.next((m) => m.retry !== undefined, "stream open");
+        for (const deviceId of [FRIDGE_ID, DISHWASHER_ID]) {
+          for (let i = 0; i < 3; i++) {
+            let entry = fake.stepActivity(deviceId)[0];
+            while (!entry) entry = fake.stepActivity(deviceId)[0];
+            const path = pathOf(entry.action);
+            const message = await stream.next(
+              (m) => !!m.data && eventData(m).deviceId === deviceId && !!eventData(m).payload.changes?.some((c) => path.test(c.path)),
+              `event for "${entry.action}"`,
+            );
+            // Consume it so the next action needs a new event.
+            stream.messages.splice(0, stream.messages.indexOf(message) + 1);
+            if (entry.action.includes("programme started")) {
+              clock += 60 * MINUTE; // let it finish before the next action
+              await stream.next(isEvent(DISHWASHER_ID, "runState.currentState", "END"), "programme end");
+              stream.messages.length = 0;
+            }
+          }
+        }
+      } finally {
+        stream.close();
+      }
+    });
+  });
+
   describe("unsubscribing", () => {
     it("stops polling and reporting a device, idempotently", async () => {
       assert.equal((await alice.request(`/api/devices/${FRIDGE_ID}/subscription`, { method: "DELETE" })).status, 204);
@@ -307,6 +362,9 @@ describe("device events over the HTTP API", () => {
       const polls = statePolls(FRIDGE_ID);
       const events = (await alice.request(`/api/events?deviceId=${FRIDGE_ID}`)).body.length;
       fake.device(FRIDGE_ID)!.patchState({ refrigeration: { expressMode: true } });
+      // The appliance keeps being used, but nobody is watching any more.
+      for (let i = 0; i < 10; i++) fake.stepActivity(FRIDGE_ID);
+      assert.ok(fake.activityLog.some((e) => e.deviceId === FRIDGE_ID));
       await sleep(5 * POLL_MS);
       assert.equal(statePolls(FRIDGE_ID), polls);
       assert.equal((await alice.request(`/api/events?deviceId=${FRIDGE_ID}`)).body.length, events, "past events are kept, no new ones");
