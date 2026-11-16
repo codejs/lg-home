@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { ThinQClient, ThinQError, type JsonObject } from "../src/server/thinq/client.js";
 import { DISHWASHER_ID, FRIDGE_ID } from "./fake-thinq/devices.js";
+import { ERRORS, THINQ_ERROR_CODES } from "./fake-thinq/protocol.js";
 import { FakeThinQ, THINQ_PUBLIC_API_KEY } from "./fake-thinq/server.js";
 
 const MINUTE = 60_000;
@@ -90,7 +91,7 @@ describe("fake ThinQ API", () => {
     });
 
     it("returns 404 for unknown devices", async () => {
-      await rejectsWith(client.getDeviceStatus("nope"), 404, "1206");
+      await rejectsWith(client.getDeviceStatus("nope"), 404, "1205");
     });
 
     it("reports offline devices as not connected", async () => {
@@ -110,7 +111,7 @@ describe("fake ThinQ API", () => {
 
     it("rejects a wrong api key", async () => {
       const wrong = new ThinQClient({ accessToken: "pat-test", countryCode: "US", clientId: "c", baseUrl: fake.url, apiKey: "x" });
-      await rejectsWith(wrong.getDevices(), 401, "1105");
+      await rejectsWith(wrong.getDevices(), 400, "1216");
     });
 
     for (const header of ["x-country", "x-client-id", "x-api-key", "x-service-phase", "x-message-id"]) {
@@ -265,11 +266,103 @@ describe("fake ThinQ API", () => {
       const state = await client.getDeviceStatus(DISHWASHER_ID);
       assert.deepEqual(state.runState, { currentState: "POWER_OFF" });
       assert.deepEqual(state.remoteControlEnable, { remoteControlEnabled: false });
-      await rejectsWith(client.controlDevice(DISHWASHER_ID, start), 400, "2302", /off/);
+      await rejectsWith(client.controlDevice(DISHWASHER_ID, start), 400, "2304", /off/);
     });
 
     it("rejects unknown operation modes", async () => {
       await rejectsWith(client.controlDevice(DISHWASHER_ID, { operation: { dishWasherOperationMode: "DANCE" } }), 400, "1102");
+    });
+  });
+
+  describe("error codes", () => {
+    it("only uses official ThinQ error codes, under their official names", () => {
+      for (const [name, { code }] of Object.entries(ERRORS)) {
+        assert.equal(code, THINQ_ERROR_CODES[name as keyof typeof THINQ_ERROR_CODES], `${name} has the wrong code`);
+      }
+    });
+
+    it("keeps official codes unique", () => {
+      const codes = Object.values(THINQ_ERROR_CODES);
+      assert.equal(new Set(codes).size, codes.length);
+    });
+
+    it("answers unknown endpoints with 404 and the generic BAD_REQUEST code", async () => {
+      const res = await fetch(`${fake.url}/devices/${FRIDGE_ID}/nonsense`, { headers: headers() });
+      assert.equal(res.status, 404);
+      assert.equal((await res.json()).error.code, "1000");
+    });
+  });
+
+  describe("fault injection", () => {
+    it("fails the next matching request once by default, then recovers", async () => {
+      fake.injectFault({ error: "EXCEEDED_API_CALLS" });
+      await rejectsWith(client.getDevices(), 429, "1306", /Injected fault/);
+      assert.equal((await client.getDevices()).length, 2);
+      assert.deepEqual(
+        fake.requests.map((r) => [r.path, r.status, r.errorCode]),
+        [
+          ["/devices", 429, "1306"],
+          ["/devices", 200, undefined],
+        ],
+      );
+    });
+
+    it("matches on method and exact path or pattern", async () => {
+      fake.injectFault({ error: "NOT_CONNECTED_DEVICE", method: "get", path: `/devices/${FRIDGE_ID}/state`, times: 2 });
+      fake.injectFault({ error: "INTERNAL_SERVER_ERROR", path: /\/control$/ });
+      await client.getDeviceStatus(DISHWASHER_ID); // other path: untouched
+      await client.getDeviceProfile(FRIDGE_ID); // other path: untouched
+      await rejectsWith(client.getDeviceStatus(FRIDGE_ID), 400, "1222");
+      await rejectsWith(client.getDeviceStatus(FRIDGE_ID), 400, "1222");
+      await client.getDeviceStatus(FRIDGE_ID);
+      await rejectsWith(client.controlDevice(FRIDGE_ID, { powerSave: { powerSaveEnabled: true } }), 500, "2000");
+      assert.deepEqual((await client.getDeviceStatus(FRIDGE_ID)).powerSave, { powerSaveEnabled: false }, "failed control changed nothing");
+    });
+
+    it("keeps failing with times: Infinity until cleared", async () => {
+      fake.injectFault({ error: "INVALID_TOKEN", times: Infinity });
+      for (let i = 0; i < 3; i++) await rejectsWith(client.getDevices(), 401, "1103");
+      fake.clearFaults();
+      await client.getDevices();
+    });
+
+    it("still checks the request headers first", async () => {
+      fake.injectFault({ error: "EXCEEDED_API_CALLS" });
+      const wrong = new ThinQClient({ accessToken: "stolen", countryCode: "US", clientId: "c", baseUrl: fake.url });
+      await rejectsWith(wrong.getDevices(), 401, "1103");
+      assert.equal(fake.pendingFaults.length, 1, "fault not used up by an unauthenticated request");
+    });
+
+    it("is cleared by reset", async () => {
+      fake.injectFault({ error: "EXCEEDED_API_CALLS", times: Infinity });
+      fake.reset();
+      await client.getDevices();
+    });
+
+    it("rejects invalid fault specs in-process", () => {
+      assert.throws(() => fake.injectFault({ error: "NOPE" as "BAD_REQUEST" }), /Unknown fake error kind/);
+      assert.throws(() => fake.injectFault({ error: "BAD_REQUEST", times: 0 }), /positive integer/);
+      assert.throws(() => fake.injectFault({ error: "BAD_REQUEST", times: 1.5 }), /positive integer/);
+    });
+
+    it("can be driven over HTTP", async () => {
+      const post = (body: unknown) =>
+        fetch(`${fake.url}/__fake/faults`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+      for (const bad of [{}, { error: "NOPE" }, { error: "toString" }, { error: "BAD_REQUEST", times: 0 }, { error: "BAD_REQUEST", path: 5 }]) {
+        assert.equal((await post(bad)).status, 400, JSON.stringify(bad));
+      }
+      const created = await post({ error: "EXCEEDED_API_CALLS", path: "/devices", times: "always" });
+      assert.equal(created.status, 201);
+      assert.deepEqual(await created.json(), [{ error: "EXCEEDED_API_CALLS", path: "/devices", remaining: "always" }]);
+
+      await rejectsWith(client.getDevices(), 429, "1306");
+      await rejectsWith(client.getDevices(), 429, "1306");
+      assert.equal((await (await fetch(`${fake.url}/__fake/faults`)).json()).length, 1);
+
+      assert.equal((await fetch(`${fake.url}/__fake/faults`, { method: "DELETE" })).status, 200);
+      assert.deepEqual(await (await fetch(`${fake.url}/__fake/faults`)).json(), []);
+      await client.getDevices();
     });
   });
 

@@ -9,6 +9,7 @@ import {
   sessionCookie,
   sessionTokenOf,
 } from "../auth.js";
+import { closeStreamsForSession } from "../events/streams.js";
 
 interface LoginBody {
   username: string;
@@ -87,7 +88,9 @@ export async function authRoutes(app: FastifyInstance) {
 
     attempts.delete(key);
     // Drop any cookie the client arrived with, then issue a fresh session.
-    deleteSession(sessionTokenOf(req));
+    const previous = sessionTokenOf(req);
+    deleteSession(previous);
+    closeStreamsForSession(previous);
     const { token, expiresAt } = createSession(user.id);
     reply.header("Set-Cookie", sessionCookie(token, expiresAt, isSecureRequest(req)));
     req.log.info({ userId: user.id, username: user.username }, "login succeeded");
@@ -96,7 +99,10 @@ export async function authRoutes(app: FastifyInstance) {
 
   /** Drop the current session; safe to call when not signed in. */
   app.post("/api/auth/logout", async (req, reply) => {
-    deleteSession(sessionTokenOf(req));
+    const token = sessionTokenOf(req);
+    deleteSession(token);
+    // Live event streams of this session end now, not at the next heartbeat.
+    closeStreamsForSession(token);
     reply.header("Set-Cookie", clearedSessionCookie(isSecureRequest(req)));
     return { ok: true };
   });

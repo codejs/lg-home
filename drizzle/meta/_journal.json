@@ -15,6 +15,13 @@
       "when": 1794770171206,
       "tag": "0001_loud_ender_wiggin",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794780437569,
+      "tag": "0002_event_subscriptions",
+      "breakpoints": true
     }
   ]
 }

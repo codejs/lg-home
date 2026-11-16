@@ -51,11 +51,42 @@ export const deviceStates = sqliteTable("device_states", {
   recordedAt: integer("recorded_at", { mode: "timestamp_ms" }).notNull(),
 });
 
-/** Push/event messages received from ThinQ (MQTT), and control commands sent. */
-export const events = sqliteTable("events", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  deviceId: text("device_id"),
-  kind: text("kind").notNull(), // "push" | "event" | "control"
-  payload: text("payload", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+/**
+ * Device events: state changes detected by the event poller (kind "event") and
+ * control commands sent (kind "control"). The schema also allows "push" for
+ * ThinQ notifications, which are not received yet.
+ */
+export const events = sqliteTable(
+  "events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    deviceId: text("device_id"),
+    kind: text("kind").notNull(), // "event" | "control" | "push"
+    payload: text("payload", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    // History per device, newest first (the rowid id is implicitly appended).
+    index("events_device_id_idx").on(table.deviceId),
+    // Retention sweeps.
+    index("events_kind_created_at_idx").on(table.kind, table.createdAt),
+  ],
+);
+
+/**
+ * Devices whose state changes are watched. Subscriptions are shared by all
+ * users (they belong to the one ThinQ account). `lastState` is the poller's
+ * baseline: the state it last saw, so changes survive restarts.
+ */
+export const subscriptions = sqliteTable("subscriptions", {
+  deviceId: text("device_id")
+    .primaryKey()
+    .references(() => devices.id, { onDelete: "cascade" }),
+  createdBy: integer("created_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  lastState: text("last_state", { mode: "json" }).$type<Record<string, unknown>>(),
+  lastPolledAt: integer("last_polled_at", { mode: "timestamp_ms" }),
+  lastChangeAt: integer("last_change_at", { mode: "timestamp_ms" }),
+  lastError: text("last_error"),
+  lastErrorAt: integer("last_error_at", { mode: "timestamp_ms" }),
 });

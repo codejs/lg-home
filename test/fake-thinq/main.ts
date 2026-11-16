@@ -29,7 +29,7 @@ const url = await fake.listen(port, host);
 console.log(`Fake ThinQ API listening on ${url}`);
 for (const d of fake.devices) console.log(`  ${d.deviceInfo.deviceType.padEnd(22)} ${d.deviceInfo.alias.padEnd(16)} ${d.deviceId}`);
 console.log(`Point the app at it with THINQ_API_BASE_URL=${url}` + (accessToken ? ` and THINQ_ACCESS_TOKEN=${accessToken}` : ""));
-console.log(`Scenario endpoints: GET ${url}/__fake/requests, POST ${url}/__fake/reset, PATCH ${url}/__fake/devices/<id>`);
+console.log(`Scenario endpoints: GET ${url}/__fake/requests, POST ${url}/__fake/reset, PATCH ${url}/__fake/devices/<id>, GET/POST/DELETE ${url}/__fake/faults`);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, async () => {

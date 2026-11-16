@@ -283,7 +283,7 @@ export class FakeDishWasher extends FakeDevice {
   private start(now: number): void {
     const state = this.currentState;
     if (state === "POWER_OFF") {
-      throw new FakeThinQError("COMMAND_NOT_SUPPORTED_IN_STATE", "The dishwasher is off; it must be powered on at the appliance");
+      throw new FakeThinQError("COMMAND_NOT_SUPPORTED_IN_POWER_OFF", "The dishwasher is off; it must be powered on at the appliance");
     }
     if ((this.state.remoteControlEnable as Json).remoteControlEnabled !== true) {
       throw new FakeThinQError("COMMAND_NOT_SUPPORTED_IN_REMOTE_OFF", "Remote start is not enabled on the appliance");

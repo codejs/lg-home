@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { desc, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { thinq } from "../thinq/index.js";
+import { recordEvent } from "../events/store.js";
 
 export async function deviceRoutes(app: FastifyInstance) {
   /** List devices from the local database (fast, works offline). */
@@ -72,9 +73,7 @@ export async function deviceRoutes(app: FastifyInstance) {
     { schema: { body: { type: "object", minProperties: 1 } } },
     async (req) => {
       const result = await thinq().controlDevice(req.params.id, req.body);
-      db.insert(schema.events)
-        .values({ deviceId: req.params.id, kind: "control", payload: req.body, createdAt: new Date() })
-        .run();
+      recordEvent({ deviceId: req.params.id, kind: "control", payload: req.body });
       return Object.keys(result).length ? result : { ok: true };
     },
   );
