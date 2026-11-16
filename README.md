@@ -18,10 +18,38 @@ npm run dev                 # API on :3000, SPA on http://localhost:5173
 
 Production: `npm run build && npm start` (serves the API and SPA on :3000).
 
-Tests: `npm test` runs unit tests for the ThinQ client, contract tests for the
-[fake ThinQ API](#fake-thinq-api), and an integration test that boots the server
-against the fake (no network or real account needed). `npm run typecheck`
-checks server, web and test code.
+## Tests
+
+```sh
+npm test                  # everything (~30 s)
+npm run test:unit         # fast, in-process: no ports, no subprocesses
+npm run test:integration  # real server / CLI processes against the fake ThinQ API
+npm run typecheck         # server, web and test code
+```
+
+Tests use Node's built-in runner (`node:test`) via tsx; React components are
+tested with Testing Library on [happy-dom](https://github.com/capricorn86/happy-dom).
+
+| Directory | What it covers |
+| --- | --- |
+| `test/unit/server/` | Password hashing and verification, sessions, cookies, the login rate limiter, user provisioning, CLI argument parsing, ThinQ client and config, DB constraints, and every HTTP route via `app.inject()` (auth gate audit, error mapping, static hosting) |
+| `test/unit/web/` | The browser API client, device-state formatting (`deviceFormat`), `DeviceCard`, `LoginPage`, the `App` auth gate and `DevicesPage` |
+| `test/integration/` | The server against the [fake ThinQ API](#fake-thinq-api), the fake's own contract, and the `add_user` CLI as a real process |
+
+Security-relevant cases are tested explicitly: an audit that every `/api` route
+except login/logout/me rejects anonymous and forged sessions, session rotation
+on login, hashed session tokens, cookie flags, username enumeration, brute-force
+throttling (including whitespace/case bypass attempts), tampered password
+digests, injection-style input, path traversal, XSS in rendered data and error
+messages, and that 500 responses don't leak internals.
+
+Helpers: `test/helpers/test-db.ts` gives each test file its own SQLite file
+(import it first), `app.ts` builds the real app with a stub ThinQ client
+(`stub-thinq.ts`), `fetch.ts` routes `fetch()` in web tests, and `dom.ts`
+installs the browser globals. In web tests, use `assertAbsent`/`assertSameNode`
+from `dom.ts` rather than passing DOM nodes to `node:assert`: when such an
+assertion fails, Node tries to print the happy-dom node and the run hangs
+instead of reporting the failure.
 
 The project `.npmrc` sets `ignore-scripts=true`: better-sqlite3 ships prebuilt
 binaries, but npm would otherwise run a no-op `node-gyp rebuild` that downloads
@@ -53,6 +81,27 @@ SameSite=Lax session cookie (7 days by default, `SESSION_TTL_HOURS` to change).
 Changing a password with `--force` signs that user out everywhere. Put the app
 behind HTTPS in production so the cookie is sent with the `Secure` flag
 (auto-detected, or force it with `COOKIE_SECURE=true`).
+
+## Device cards
+
+Each device gets a card that loads its live state from ThinQ and refreshes every
+minute (or on demand via **Refresh**). Every refresh is also stored as a history
+snapshot. A card shows:
+
+- a **status pill** (Running, Ready, Finished, Off, Offline, …) when the device
+  reports a run state or power state;
+- the **key figures** in large type: compartment temperatures, time left with an
+  estimated end time and a progress bar, the selected programme or mode;
+- **alerts** that need attention (door open, rinse aid low, filter to replace,
+  appliance error) and chips for the **modes that are switched on**;
+- **All details**: every property the device reports, labelled and formatted
+  (units, durations, on/off), with the raw JSON underneath for debugging.
+
+The interpretation lives in `src/web/deviceFormat.ts`. It recognises property
+names ThinQ uses across appliances (`runState`, `timer`, `temperature`,
+`doorStatus`, `*JobMode`, …) rather than hard-coding device types, so appliances
+it has never seen still get a readable card. Add curated labels there
+(`KEY_LABELS`, `ENUM_LABELS`, `TYPE_LABELS`) to polish a specific device.
 
 ## ThinQ API
 

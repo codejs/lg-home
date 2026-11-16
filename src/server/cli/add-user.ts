@@ -9,43 +9,9 @@
  * or passed via the ADD_USER_PASSWORD environment variable.
  */
 import { createInterface } from "node:readline";
-import { eq } from "drizzle-orm";
-import { db, runMigrations, schema } from "../db/index.js";
-import { MIN_PASSWORD_LENGTH, deleteUserSessions, hashPassword, normalizeUsername } from "../auth.js";
-
-const USAGE = `Usage: npm run add_user -- <username> [--password <password>] [--force]
-
-Options:
-  --password, -p <password>  Password to set (otherwise you are prompted)
-  --force, -f                Update the password if the user already exists
-  --help, -h                 Show this help`;
-
-interface Args {
-  username?: string;
-  password?: string;
-  force: boolean;
-  help: boolean;
-}
-
-function parseArgs(argv: string[]): Args {
-  const args: Args = { force: false, help: false };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--help" || arg === "-h") args.help = true;
-    else if (arg === "--force" || arg === "-f") args.force = true;
-    else if (arg === "--password" || arg === "-p") args.password = argv[++i];
-    else if (arg.startsWith("--password=")) args.password = arg.slice("--password=".length);
-    else if (arg.startsWith("-")) fail(`Unknown option: ${arg}\n\n${USAGE}`);
-    else if (args.username === undefined) args.username = arg;
-    else fail(`Unexpected argument: ${arg}\n\n${USAGE}`);
-  }
-  return args;
-}
-
-function fail(message: string): never {
-  console.error(message);
-  process.exit(1);
-}
+import { runMigrations } from "../db/index.js";
+import { UserInputError, provisionUser, validateUsername } from "../users.js";
+import { USAGE, UsageError, firstLine, parseArgs, type AddUserArgs } from "./args.js";
 
 /** Ask for a password without echoing it back to the terminal. */
 function promptPassword(question: string): Promise<string> {
@@ -65,62 +31,48 @@ function promptPassword(question: string): Promise<string> {
   });
 }
 
-/** Read a single line from a pipe, e.g. `echo secret | npm run add_user -- alice`. */
 async function readPipedPassword(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8").split("\n")[0].trim();
+  return firstLine(Buffer.concat(chunks).toString("utf8"));
 }
 
-async function resolvePassword(args: Args): Promise<string> {
+async function resolvePassword(args: AddUserArgs): Promise<string> {
   if (args.password !== undefined) return args.password;
   if (process.env.ADD_USER_PASSWORD) return process.env.ADD_USER_PASSWORD;
   if (!process.stdin.isTTY) return readPipedPassword();
 
   const password = await promptPassword("Password: ");
   const confirm = await promptPassword("Confirm password: ");
-  if (password !== confirm) fail("Passwords do not match.");
+  if (password !== confirm) throw new UserInputError("Passwords do not match.");
   return password;
 }
 
-async function main() {
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(USAGE);
     return;
   }
-
-  const rawUsername = args.username;
-  if (!rawUsername) fail(USAGE);
-  const username = normalizeUsername(rawUsername);
-  if (!/^[a-z0-9._@-]{3,64}$/.test(username)) {
-    fail("Username must be 3-64 characters: letters, digits, dot, dash, underscore or @.");
-  }
-
+  validateUsername(args.username!); // fail before asking for a password
   const password = await resolvePassword(args);
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    fail(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
-  }
-
   // The CLI can run before the server ever started, so make sure the schema exists.
   runMigrations();
-
-  const existing = db.select().from(schema.users).where(eq(schema.users.username, username)).get();
-  if (existing && !args.force) {
-    fail(`User "${username}" already exists. Re-run with --force to change the password.`);
-  }
-
-  const now = new Date();
-  const passwordHash = await hashPassword(password);
-
-  if (existing) {
-    db.update(schema.users).set({ passwordHash, updatedAt: now }).where(eq(schema.users.id, existing.id)).run();
-    deleteUserSessions(existing.id); // force a fresh login everywhere
-    console.log(`Updated password for "${username}". Existing sessions were signed out.`);
-  } else {
-    db.insert(schema.users).values({ username, passwordHash, createdAt: now, updatedAt: now }).run();
-    console.log(`Created user "${username}".`);
-  }
+  const result = await provisionUser({ username: args.username!, password, force: args.force });
+  console.log(
+    result.created
+      ? `Created user "${result.username}".`
+      : `Updated password for "${result.username}". Existing sessions were signed out.`,
+  );
 }
 
-await main();
+try {
+  await main();
+} catch (err) {
+  if (err instanceof UsageError || err instanceof UserInputError) {
+    console.error(err.message);
+    process.exitCode = 1;
+  } else {
+    throw err;
+  }
+}

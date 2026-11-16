@@ -1,0 +1,17 @@
+{
+  // Type-checks tests together with the code they import, and gives tsx the
+  // JSX settings it needs to run React component tests. Builds use
+  // tsconfig.server.json (server) and Vite with tsconfig.web.json (SPA).
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node", "vite/client"]
+  },
+  "include": ["src", "test"]
+}

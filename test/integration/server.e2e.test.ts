@@ -11,11 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { after, before, describe, it } from "node:test";
-import { DISHWASHER_ID, FRIDGE_ID } from "./fake-thinq/devices.js";
-import { FakeThinQ } from "./fake-thinq/server.js";
+import { DISHWASHER_ID, FRIDGE_ID } from "../fake-thinq/devices.js";
+import { FakeThinQ } from "../fake-thinq/server.js";
 
 const run = promisify(execFile);
-const ROOT = join(import.meta.dirname, "..");
+const ROOT = join(import.meta.dirname, "../..");
 const MINUTE = 60_000;
 
 function freePort(): Promise<number> {

@@ -1,5 +1,6 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import {
+  MAX_PASSWORD_LENGTH,
   authenticate,
   clearedSessionCookie,
   createSession,
@@ -9,14 +10,20 @@ import {
   sessionCookie,
   sessionTokenOf,
 } from "../auth.js";
+import { LoginThrottle } from "../login-throttle.js";
 
 interface LoginBody {
   username: string;
   password: string;
 }
 
+export interface AuthRoutesOptions {
+  /** Brute-force brake; each registration gets its own unless one is passed in. */
+  throttle?: LoginThrottle;
+}
+
 /** Generic on purpose: never reveal whether the username or the password was wrong. */
-const INVALID_CREDENTIALS = "Invalid username or password";
+export const INVALID_CREDENTIALS = "Invalid username or password";
 
 const loginSchema = {
   body: {
@@ -24,43 +31,15 @@ const loginSchema = {
     required: ["username", "password"],
     properties: {
       username: { type: "string", minLength: 1, maxLength: 128 },
-      password: { type: "string", minLength: 1, maxLength: 1024 },
+      password: { type: "string", minLength: 1, maxLength: MAX_PASSWORD_LENGTH },
     },
     additionalProperties: false,
   },
 } as const;
 
-// Simple in-memory brute-force brake: too many failures from one IP/username
-// pair parks further attempts for a while. Resets when the process restarts.
-const MAX_ATTEMPTS = 10;
-const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
-const attempts = new Map<string, { count: number; firstAt: number }>();
+export async function authRoutes(app: FastifyInstance, options: AuthRoutesOptions = {}) {
+  const throttle = options.throttle ?? new LoginThrottle();
 
-function attemptKey(req: FastifyRequest, username: string): string {
-  return `${req.ip}|${username.toLowerCase()}`;
-}
-
-function tooManyAttempts(key: string): boolean {
-  const entry = attempts.get(key);
-  if (!entry) return false;
-  if (Date.now() - entry.firstAt > ATTEMPT_WINDOW_MS) {
-    attempts.delete(key);
-    return false;
-  }
-  return entry.count >= MAX_ATTEMPTS;
-}
-
-function recordFailure(key: string): void {
-  const now = Date.now();
-  const entry = attempts.get(key);
-  if (!entry || now - entry.firstAt > ATTEMPT_WINDOW_MS) {
-    attempts.set(key, { count: 1, firstAt: now });
-    return;
-  }
-  entry.count += 1;
-}
-
-export async function authRoutes(app: FastifyInstance) {
   /** Who am I? The SPA calls this first to decide between login page and app. */
   app.get("/api/auth/me", async (req, reply) => {
     const user = getSessionUser(sessionTokenOf(req));
@@ -71,21 +50,21 @@ export async function authRoutes(app: FastifyInstance) {
   /** Exchange credentials for a session cookie. */
   app.post<{ Body: LoginBody }>("/api/auth/login", { schema: loginSchema }, async (req, reply) => {
     const { username, password } = req.body;
-    const key = attemptKey(req, username);
+    const key = throttle.key(req.ip, username);
 
-    if (tooManyAttempts(key)) {
+    if (throttle.isBlocked(key)) {
       req.log.warn({ ip: req.ip, username }, "login blocked: too many attempts");
       return reply.code(429).send({ error: "Too many failed attempts. Try again later." });
     }
 
     const user = await authenticate(username, password);
     if (!user) {
-      recordFailure(key);
+      throttle.recordFailure(key);
       req.log.warn({ ip: req.ip, username }, "login failed");
       return reply.code(401).send({ error: INVALID_CREDENTIALS });
     }
 
-    attempts.delete(key);
+    throttle.reset(key);
     // Drop any cookie the client arrived with, then issue a fresh session.
     deleteSession(sessionTokenOf(req));
     const { token, expiresAt } = createSession(user.id);

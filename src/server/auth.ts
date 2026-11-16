@@ -24,10 +24,30 @@ const KEY_LENGTH = 64;
 const SALT_LENGTH = 16;
 
 export const SESSION_COOKIE = "lg_home_session";
-/** How long a login stays valid, in milliseconds (default 7 days). */
-export const SESSION_TTL_MS = Number(process.env.SESSION_TTL_HOURS ?? 24 * 7) * 60 * 60 * 1000;
+
+const DEFAULT_SESSION_TTL_HOURS = 24 * 7;
+const MAX_SESSION_TTL_HOURS = 24 * 366;
+
+/**
+ * Session lifetime from SESSION_TTL_HOURS (default 7 days). Invalid values fail
+ * loudly: silently producing NaN or a past expiry would break every login.
+ */
+export function sessionTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.SESSION_TTL_HOURS?.trim();
+  if (!raw) return DEFAULT_SESSION_TTL_HOURS * 60 * 60 * 1000;
+  const hours = Number(raw);
+  if (!Number.isFinite(hours) || hours <= 0 || hours > MAX_SESSION_TTL_HOURS) {
+    throw new Error(`SESSION_TTL_HOURS must be a number of hours between 0 and ${MAX_SESSION_TTL_HOURS} (got "${raw}")`);
+  }
+  return Math.round(hours * 60 * 60 * 1000);
+}
+
+/** How long a login stays valid, in milliseconds. */
+export const SESSION_TTL_MS = sessionTtlMs();
 
 export const MIN_PASSWORD_LENGTH = 8;
+/** Upper bound shared by the login endpoint and add_user, so every password set can also be used. */
+export const MAX_PASSWORD_LENGTH = 1024;
 
 export interface SessionUser {
   id: number;
@@ -41,19 +61,43 @@ export async function hashPassword(password: string): Promise<string> {
   return ["scrypt", SCRYPT.N, SCRYPT.r, SCRYPT.p, salt.toString("base64"), hash.toString("base64")].join("$");
 }
 
-/** Constant-time check of a password against a stored digest. */
-export async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const [scheme, n, r, p, saltB64, hashB64] = stored.split("$");
-  if (scheme !== "scrypt" || !saltB64 || !hashB64) return false;
+/** Digests shorter than this are treated as corrupt (an empty digest would match anything). */
+const MIN_DIGEST_LENGTH = 16;
 
-  const expected = Buffer.from(hashB64, "base64");
-  const actual = await scrypt(password.normalize("NFKC"), Buffer.from(saltB64, "base64"), expected.length, {
-    N: Number(n),
-    r: Number(r),
-    p: Number(p),
-    maxmem: SCRYPT.maxmem,
-  });
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+/** Parse a stored digest; null when malformed or its cost parameters are out of bounds. */
+function parseDigest(stored: string) {
+  const parts = stored.split("$");
+  if (parts.length !== 6 || parts[0] !== "scrypt") return null;
+  const [, n, r, p, saltB64, hashB64] = parts;
+  const N = Number(n);
+  const R = Number(r);
+  const P = Number(p);
+  // Bounds keep a tampered row from turning a login into a CPU/memory bomb.
+  const isPowerOfTwo = Number.isInteger(N) && N >= 2 ** 10 && N <= 2 ** 20 && (N & (N - 1)) === 0;
+  if (!isPowerOfTwo || !Number.isInteger(R) || R < 1 || R > 32 || !Number.isInteger(P) || P < 1 || P > 16) {
+    return null;
+  }
+  const salt = Buffer.from(saltB64, "base64");
+  const hash = Buffer.from(hashB64, "base64");
+  if (salt.length === 0 || hash.length < MIN_DIGEST_LENGTH) return null;
+  return { N, r: R, p: P, salt, hash };
+}
+
+/** Constant-time check of a password against a stored digest. Malformed digests never match. */
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const digest = parseDigest(stored);
+  if (!digest) return false;
+  try {
+    const actual = await scrypt(password.normalize("NFKC"), digest.salt, digest.hash.length, {
+      N: digest.N,
+      r: digest.r,
+      p: digest.p,
+      maxmem: SCRYPT.maxmem,
+    });
+    return timingSafeEqual(actual, digest.hash);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -132,15 +176,26 @@ export function deleteUserSessions(userId: number): void {
 
 /** Minimal cookie header parser (no extra dependency needed). */
 export function parseCookies(header: string | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
+  // Null prototype: a cookie named "__proto__" or "constructor" is just a key.
+  const out: Record<string, string> = Object.create(null);
   if (!header) return out;
   for (const part of header.split(";")) {
     const eq = part.indexOf("=");
     if (eq < 1) continue;
     const name = part.slice(0, eq).trim();
-    if (!(name in out)) out[name] = decodeURIComponent(part.slice(eq + 1).trim());
+    if (!name || Object.hasOwn(out, name)) continue;
+    out[name] = safeDecode(part.slice(eq + 1).trim());
   }
   return out;
+}
+
+/** Cookie values come from the client: malformed %-escapes must not throw. */
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 export function sessionCookie(token: string, expiresAt: Date, secure: boolean): string {

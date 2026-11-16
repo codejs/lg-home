@@ -1,9 +1,32 @@
 import type { FastifyInstance } from "fastify";
 import { desc, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
-import { thinq } from "../thinq/index.js";
+import { thinq as defaultThinQ, type ThinQClient, type ThinQDevice } from "../thinq/index.js";
 
-export async function deviceRoutes(app: FastifyInstance) {
+/** The part of the ThinQ client these routes use (lets tests pass a stub). */
+export type ThinQDeviceApi = Pick<ThinQClient, "getDevices" | "getDeviceStatus" | "getDeviceProfile" | "controlDevice">;
+
+export interface DeviceRoutesOptions {
+  thinq?: () => ThinQDeviceApi;
+}
+
+/** ThinQ data is external input: only entries with an id and a type can be stored. */
+function isUsableDevice(d: unknown): d is ThinQDevice {
+  const device = d as Partial<ThinQDevice> | null;
+  return (
+    typeof device?.deviceId === "string" &&
+    device.deviceId.length > 0 &&
+    typeof device.deviceInfo === "object" &&
+    device.deviceInfo !== null &&
+    typeof device.deviceInfo.deviceType === "string"
+  );
+}
+
+const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
+
+export async function deviceRoutes(app: FastifyInstance, options: DeviceRoutesOptions = {}) {
+  const thinq = options.thinq ?? defaultThinQ;
+
   /** List devices from the local database (fast, works offline). */
   app.get("/api/devices", async () => {
     return db.select().from(schema.devices).orderBy(schema.devices.alias).all();
@@ -11,16 +34,20 @@ export async function deviceRoutes(app: FastifyInstance) {
 
   /** Fetch the device list from ThinQ and upsert it into the database. */
   app.post("/api/devices/sync", async () => {
-    const list = await thinq().getDevices();
+    const fetched = await thinq().getDevices();
+    const list = Array.isArray(fetched) ? fetched.filter(isUsableDevice) : [];
+    const skipped = (Array.isArray(fetched) ? fetched.length : 0) - list.length;
+    if (skipped > 0) app.log.warn({ skipped }, "ignored malformed devices from ThinQ");
     const now = new Date();
     db.transaction((tx) => {
       for (const d of list) {
+        const info = d.deviceInfo;
         const row = {
           id: d.deviceId,
-          type: d.deviceInfo.deviceType,
-          alias: d.deviceInfo.alias ?? d.deviceInfo.modelName ?? d.deviceId,
-          modelName: d.deviceInfo.modelName ?? null,
-          reportable: d.deviceInfo.reportable ?? null,
+          type: info.deviceType,
+          alias: str(info.alias) ?? str(info.modelName) ?? d.deviceId,
+          modelName: str(info.modelName) ?? null,
+          reportable: typeof info.reportable === "boolean" ? info.reportable : null,
           raw: d as unknown as Record<string, unknown>,
           updatedAt: now,
         };

@@ -8,8 +8,8 @@ import {
   baseUrlForRegion,
   newMessageId,
   regionForCountry,
-} from "../src/server/thinq/client.js";
-import { MockThinQ, fail, ok } from "./helpers/mock-thinq.js";
+} from "../../../src/server/thinq/client.js";
+import { MockThinQ, fail, ok } from "../../helpers/mock-thinq.js";
 
 describe("regions", () => {
   it("maps countries to their regional API server", () => {
@@ -170,5 +170,138 @@ describe("ThinQClient", () => {
   it("requires a token and a client id", () => {
     assert.throws(() => new ThinQClient({ accessToken: "", countryCode: "US", clientId: "c" }), ThinQConfigError);
     assert.throws(() => new ThinQClient({ accessToken: "t", countryCode: "US", clientId: "" }), ThinQConfigError);
+  });
+});
+
+describe("ThinQClient edge cases", () => {
+  const mock = new MockThinQ();
+  let client: ThinQClient;
+
+  before(() => mock.start());
+  after(() => mock.stop());
+  beforeEach(() => {
+    mock.requests.length = 0;
+    client = new ThinQClient({ accessToken: "pat-SECRET-123", countryCode: "de", clientId: "cid", baseUrl: `${mock.url}///` });
+  });
+
+  it("normalises trailing slashes in the base URL", async () => {
+    mock.handler = () => ok([]);
+    await client.getDevices();
+    assert.equal(mock.requests[0].url, "/devices");
+  });
+
+  it("sends no body or content-type on GET, and asks for JSON", async () => {
+    mock.handler = () => ok({});
+    await client.getDeviceStatus("d1");
+    const req = mock.requests[0];
+    assert.equal(req.body, undefined);
+    assert.equal(req.headers["content-type"], undefined);
+    assert.equal(req.headers.accept, "application/json");
+    assert.equal(req.headers["x-conditional-control"], undefined, "only control is conditional");
+  });
+
+  it("escapes ids in every device path so they can't address other endpoints", async () => {
+    mock.handler = () => ok({});
+    const id = "../../devices?x=1#frag";
+    await client.getDeviceStatus(id);
+    await client.getDeviceProfile(id);
+    await client.controlDevice(id, { a: 1 });
+    const encoded = encodeURIComponent(id);
+    assert.deepEqual(
+      mock.requests.map((r) => r.url),
+      [`/devices/${encoded}/state`, `/devices/${encoded}/profile`, `/devices/${encoded}/control`],
+    );
+  });
+
+  it("treats an empty success body as no data", async () => {
+    mock.handler = () => ({ status: 204, body: "" });
+    assert.deepEqual(await client.getDevices(), []);
+    assert.deepEqual(await client.getDeviceStatus("d1"), {});
+    assert.deepEqual(await client.controlDevice("d1", { a: 1 }), {});
+  });
+
+  it("treats response: null as no data", async () => {
+    mock.handler = () => ok(null);
+    assert.deepEqual(await client.getDevices(), []);
+    assert.deepEqual(await client.getDeviceProfile("d1"), {});
+  });
+
+  it("stringifies numeric error codes", async () => {
+    mock.handler = () => ({ status: 400, body: { error: { code: 1222, message: "Not connected" } } });
+    await assert.rejects(client.getDevices(), (err: unknown) => err instanceof ThinQError && err.code === "1222");
+  });
+
+  it("falls back to the HTTP status text when the error has no message", async () => {
+    mock.handler = () => ({ status: 404, body: { error: {} } });
+    await assert.rejects(client.getDevices(), (err: unknown) => {
+      assert.ok(err instanceof ThinQError);
+      assert.equal(err.code, null);
+      assert.match(err.message, /404.*Not Found/);
+      return true;
+    });
+  });
+
+  it("ignores a non-string error message", async () => {
+    mock.handler = () => ({ status: 500, body: { error: { code: "0000", message: { nested: true } } } });
+    await assert.rejects(client.getDevices(), (err: unknown) => err instanceof ThinQError && !err.message.includes("[object"));
+  });
+
+  it("never puts the access token into error messages", async () => {
+    mock.handler = () => fail(401, "1103", "Invalid token");
+    await assert.rejects(client.getDevices(), (err: unknown) => err instanceof Error && !err.message.includes("SECRET"));
+    const offline = new ThinQClient({ accessToken: "pat-SECRET-123", countryCode: "US", clientId: "c", baseUrl: "http://127.0.0.1:1" });
+    await assert.rejects(offline.getDevices(), (err: unknown) => err instanceof Error && !err.message.includes("SECRET"));
+  });
+
+  it("upper-cases the country header and sends a custom api key", async () => {
+    const custom = new ThinQClient({ accessToken: "t", countryCode: " gb ", clientId: "c", baseUrl: mock.url, apiKey: "k-1" });
+    mock.handler = () => ok([]);
+    await custom.getDevices();
+    assert.equal(mock.requests[0].headers["x-country"], "GB");
+    assert.equal(mock.requests[0].headers["x-api-key"], "k-1");
+  });
+
+  it("serialises unicode and nested command bodies faithfully", async () => {
+    mock.handler = () => ok({});
+    const command = { display: { text: "Grüße 🔥", list: [1, null, { deep: true }] } };
+    await client.controlDevice("d1", command);
+    assert.deepEqual(mock.requests[0].body, command);
+  });
+
+  it("times out each request independently", async () => {
+    const fast = new ThinQClient({ accessToken: "t", countryCode: "US", clientId: "c", baseUrl: mock.url, timeoutMs: 1000 });
+    mock.handler = () => ({ ...ok([]), delayMs: 600 });
+    await fast.getDevices();
+    await fast.getDevices(); // 1200 ms in total, more than one timeout, but each call is well under it
+    assert.equal(mock.requests.length, 2);
+  });
+
+  it("accepts a custom fetch implementation", async () => {
+    const seen: string[] = [];
+    const custom = new ThinQClient({
+      accessToken: "t",
+      countryCode: "US",
+      clientId: "c",
+      baseUrl: "https://example.invalid",
+      fetch: (async (url: string) => {
+        seen.push(url);
+        return new Response(JSON.stringify({ response: [{ deviceId: "x", deviceInfo: { deviceType: "T" } }] }), { status: 200 });
+      }) as typeof fetch,
+    });
+    assert.equal((await custom.getDevices()).length, 1);
+    assert.deepEqual(seen, ["https://example.invalid/devices"]);
+  });
+});
+
+describe("region table", () => {
+  it("every listed country maps to exactly one region", () => {
+    const samples = ["US", "CA", "MX", "BR", "GB", "DE", "FR", "IT", "ES", "AE", "ZA", "KR", "JP", "AU", "IN", "SG", "NZ"];
+    for (const c of samples) assert.match(regionForCountry(c), /^(AIC|EIC|KIC)$/, c);
+  });
+
+  it("rejects codes that are not two letters", () => {
+    for (const c of ["", "U", "USA", "12", "U$", "us-east"]) {
+      assert.throws(() => regionForCountry(c), ThinQConfigError, c);
+    }
   });
 });

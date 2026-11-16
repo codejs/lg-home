@@ -1,6 +1,6 @@
-import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Device, type User } from "./api";
+import { api, type User } from "./api";
+import { DeviceCard } from "./DeviceCard";
 
 /** The app proper, shown once a user is signed in. */
 export function DevicesPage({ user }: { user: User }) {
@@ -17,7 +17,6 @@ export function DevicesPage({ user }: { user: User }) {
       queryClient.removeQueries({ predicate: (q) => q.queryKey[0] !== "me" });
     },
   });
-  const [selected, setSelected] = useState<string | null>(null);
 
   return (
     <main>
@@ -37,34 +36,13 @@ export function DevicesPage({ user }: { user: User }) {
       {devices.error && <p className="error">{devices.error.message}</p>}
       {devices.data?.length === 0 && <p>No devices yet. Click “Sync from ThinQ”.</p>}
 
-      <ul className="devices">
+      <ul className="device-grid" aria-label="Devices">
         {devices.data?.map((d) => (
           <li key={d.id}>
-            <button className={d.id === selected ? "active" : ""} onClick={() => setSelected(d.id)}>
-              <strong>{d.alias}</strong>
-              <span>{prettyType(d)}</span>
-            </button>
+            <DeviceCard device={d} />
           </li>
         ))}
       </ul>
-
-      {selected && <DeviceStatus id={selected} />}
     </main>
   );
-}
-
-function DeviceStatus({ id }: { id: string }) {
-  const status = useQuery({ queryKey: ["status", id], queryFn: () => api.status(id), refetchInterval: 30_000 });
-  return (
-    <section>
-      <h2>Status</h2>
-      {status.isPending && <p>Loading…</p>}
-      {status.error && <p className="error">{status.error.message}</p>}
-      {status.data && <pre>{JSON.stringify(status.data, null, 2)}</pre>}
-    </section>
-  );
-}
-
-function prettyType(d: Device) {
-  return d.type.replace(/^DEVICE_/, "").replace(/_/g, " ").toLowerCase();
 }

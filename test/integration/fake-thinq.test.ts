@@ -5,9 +5,9 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { after, before, beforeEach, describe, it } from "node:test";
-import { ThinQClient, ThinQError, type JsonObject } from "../src/server/thinq/client.js";
-import { DISHWASHER_ID, FRIDGE_ID } from "./fake-thinq/devices.js";
-import { FakeThinQ, THINQ_PUBLIC_API_KEY } from "./fake-thinq/server.js";
+import { ThinQClient, ThinQError, type JsonObject } from "../../src/server/thinq/client.js";
+import { DISHWASHER_ID, FRIDGE_ID } from "../fake-thinq/devices.js";
+import { FakeThinQ, THINQ_PUBLIC_API_KEY } from "../fake-thinq/server.js";
 
 const MINUTE = 60_000;
 

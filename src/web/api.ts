@@ -16,11 +16,22 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** Parsed JSON error body, e.g. `{ error, thinqStatus, thinqCode }`. */
+    readonly body: unknown = null,
   ) {
     super(message);
     this.name = "ApiError";
   }
+
+  /** ThinQ's error code when the server relayed a ThinQ failure. */
+  get thinqCode(): string | null {
+    const code = (this.body as { thinqCode?: unknown } | null)?.thinqCode;
+    return typeof code === "string" ? code : null;
+  }
 }
+
+/** ThinQ reports a device it can't reach with this code. */
+export const THINQ_NOT_CONNECTED = "1222";
 
 /** Called when the server rejects a request because the session is gone. */
 let onUnauthorized: (() => void) | undefined;
@@ -40,7 +51,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // An expired session on a normal call should bounce the user to the login
     // page; a rejected login is handled by the login form itself.
     if (res.status === 401 && !path.startsWith("/api/auth/")) onUnauthorized?.();
-    throw new ApiError(data?.error ?? data?.message ?? `${res.status} ${res.statusText}`, res.status);
+    throw new ApiError(data?.error ?? data?.message ?? `${res.status} ${res.statusText}`, res.status, data);
   }
   return data as T;
 }
@@ -67,7 +78,8 @@ export const api = {
 
   devices: () => request<Device[]>("/api/devices"),
   syncDevices: () => request<Device[]>("/api/devices/sync", { method: "POST" }),
-  status: (id: string) => request<Record<string, unknown>>(`/api/devices/${id}/status`),
+  // Ids are opaque: encode them so "/", "?" or "#" can't change the URL.
+  status: (id: string) => request<Record<string, unknown>>(`/api/devices/${encodeURIComponent(id)}/status`),
   control: (id: string, command: Record<string, unknown>) =>
-    request(`/api/devices/${id}/control`, { method: "POST", body: JSON.stringify(command) }),
+    request(`/api/devices/${encodeURIComponent(id)}/control`, { method: "POST", body: JSON.stringify(command) }),
 };
