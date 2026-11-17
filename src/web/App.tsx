@@ -1,7 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "./api";
 import { LoginPage } from "./LoginPage";
 import { DevicesPage } from "./DevicesPage";
+import { useMe } from "./queries";
 
 /**
  * Auth gate: ask the server who we are, then show either the login page or the
@@ -9,7 +8,7 @@ import { DevicesPage } from "./DevicesPage";
  * falls back to the login page as soon as the session expires.
  */
 export function App() {
-  const me = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false, staleTime: 60_000 });
+  const me = useMe();
 
   if (me.isPending) {
     return (

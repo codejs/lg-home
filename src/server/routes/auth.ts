@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type { JsonSchemaToTsProvider } from "@fastify/type-provider-json-schema-to-ts";
 import {
   MAX_PASSWORD_LENGTH,
   authenticate,
@@ -11,15 +12,17 @@ import {
   sessionTokenOf,
 } from "../auth.js";
 import { LoginThrottle } from "../login-throttle.js";
-
-interface LoginBody {
-  username: string;
-  password: string;
-}
+import type { StreamRegistry } from "../events/streams.js";
 
 export interface AuthRoutesOptions {
   /** Brute-force brake; each registration gets its own unless one is passed in. */
   throttle?: LoginThrottle;
+  /** How long a login stays valid (SESSION_TTL_HOURS); default 7 days. */
+  sessionTtlMs?: number;
+  /** Force the cookie's Secure flag on or off (COOKIE_SECURE); null/omitted detects HTTPS. */
+  cookieSecure?: boolean | null;
+  /** The app's event streams, ended when their session logs out or is replaced. */
+  streams?: StreamRegistry;
 }
 
 /** Generic on purpose: never reveal whether the username or the password was wrong. */
@@ -37,7 +40,9 @@ const loginSchema = {
   },
 } as const;
 
-export async function authRoutes(app: FastifyInstance, options: AuthRoutesOptions = {}) {
+export async function authRoutes(instance: FastifyInstance, options: AuthRoutesOptions = {}) {
+  // Request types are derived from the route schemas below.
+  const app = instance.withTypeProvider<JsonSchemaToTsProvider>();
   const throttle = options.throttle ?? new LoginThrottle();
 
   /** Who am I? The SPA calls this first to decide between login page and app. */
@@ -48,7 +53,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
   });
 
   /** Exchange credentials for a session cookie. */
-  app.post<{ Body: LoginBody }>("/api/auth/login", { schema: loginSchema }, async (req, reply) => {
+  app.post("/api/auth/login", { schema: loginSchema }, async (req, reply) => {
     const { username, password } = req.body;
     const key = throttle.key(req.ip, username);
 
@@ -66,17 +71,22 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
 
     throttle.reset(key);
     // Drop any cookie the client arrived with, then issue a fresh session.
-    deleteSession(sessionTokenOf(req));
-    const { token, expiresAt } = createSession(user.id);
-    reply.header("Set-Cookie", sessionCookie(token, expiresAt, isSecureRequest(req)));
+    const previous = sessionTokenOf(req);
+    deleteSession(previous);
+    options.streams?.closeForSession(previous);
+    const { token, expiresAt } = createSession(user.id, options.sessionTtlMs);
+    reply.header("Set-Cookie", sessionCookie(token, expiresAt, isSecureRequest(req, options.cookieSecure)));
     req.log.info({ userId: user.id, username: user.username }, "login succeeded");
     return { user };
   });
 
   /** Drop the current session; safe to call when not signed in. */
   app.post("/api/auth/logout", async (req, reply) => {
-    deleteSession(sessionTokenOf(req));
-    reply.header("Set-Cookie", clearedSessionCookie(isSecureRequest(req)));
+    const token = sessionTokenOf(req);
+    deleteSession(token);
+    // Live event streams of this session end now, not at the next heartbeat.
+    options.streams?.closeForSession(token);
+    reply.header("Set-Cookie", clearedSessionCookie(isSecureRequest(req, options.cookieSecure)));
     return { ok: true };
   });
 }

@@ -4,11 +4,17 @@
  */
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { after } from "node:test";
+import { FakeEventSource } from "./event-source.js";
 
 GlobalRegistrator.register({ url: "http://localhost:5173/" });
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 after(() => GlobalRegistrator.unregister());
+
+// Neither happy-dom nor Node has EventSource, which the signed-in app uses for
+// live device events: install a controllable fake that never connects.
+const globals = globalThis as { EventSource?: unknown };
+globals.EventSource ??= FakeEventSource;
 
 /*
  * DOM-safe assertions. Never hand DOM nodes to node:assert: when an assertion

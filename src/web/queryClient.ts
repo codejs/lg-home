@@ -1,5 +1,6 @@
 import { QueryClient, type QueryClientConfig } from "@tanstack/react-query";
 import { setUnauthorizedHandler } from "./api";
+import { signOutLocally } from "./queries";
 
 /**
  * The app's query client. A 401 from any API call means the session ended:
@@ -10,9 +11,6 @@ export function createQueryClient(config: QueryClientConfig = {}): QueryClient {
     ...config,
     defaultOptions: { ...config.defaultOptions, queries: { retry: false, ...config.defaultOptions?.queries } },
   });
-  setUnauthorizedHandler(() => {
-    queryClient.setQueryData(["me"], null);
-    queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "me" });
-  });
+  setUnauthorizedHandler(() => signOutLocally(queryClient));
   return queryClient;
 }

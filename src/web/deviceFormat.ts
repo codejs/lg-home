@@ -11,18 +11,16 @@
  * unit-tested exhaustively.
  */
 
-export type Json = Record<string, unknown>;
+import { isObject, own, type Json } from "../shared/json";
+import { formatClock } from "./time";
+
+export type { Json };
 
 // ---------------------------------------------------------------------------
 // Labels
 
-/**
- * Table lookup that ignores inherited properties: device data may contain keys
- * like "constructor" or "toString", which must not resolve to Object.prototype.
- */
-function own<T>(table: Record<string, T>, key: string): T | undefined {
-  return Object.hasOwn(table, key) ? table[key] : undefined;
-}
+// Table lookups use own(): device data may contain keys like "constructor" or
+// "toString", which must not resolve to Object.prototype.
 
 /** Nicer names for well-known keys; anything else is derived from camelCase. */
 const KEY_LABELS: Record<string, string> = {
@@ -165,7 +163,6 @@ export function deviceTypeLabel(type: string): string {
 // ---------------------------------------------------------------------------
 // Values
 
-const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
 const isEnumLike = (s: string) => /^[A-Z][A-Z0-9_]*$/.test(s);
 const NUMBER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 
@@ -316,6 +313,55 @@ export function describeState(state: Json): DetailGroup[] {
 }
 
 // ---------------------------------------------------------------------------
+// Paths (device events)
+
+/** A path segment: `temperature[FREEZER]` -> key "temperature", location "FREEZER". */
+interface PathSegment {
+  key: string;
+  location?: string;
+}
+
+function parsePath(path: string): PathSegment[] {
+  const segments: PathSegment[] = [];
+  for (const m of path.matchAll(/([^.[\]]+)(?:\[([^\]]*)\])?/g)) {
+    segments.push(m[2] === undefined ? { key: m[1] } : { key: m[1], location: m[2] });
+  }
+  return segments;
+}
+
+/** Like humanizeKey, but timer parts get the card's names: remainMinute -> "Time left (min)". */
+function propertyLabel(key: string): string {
+  const part = /^(.*)(Hour|Minute)(.*)$/.exec(key);
+  const duration = part ? own(DURATION_LABELS, part[1] + part[3]) : undefined;
+  if (duration) return `${duration} (${part![2] === "Hour" ? "h" : "min"})`;
+  return humanizeKey(key);
+}
+
+/**
+ * A readable name for a value in a device state, as device events address it
+ * (`runState.currentState`, `temperature[FREEZER].targetTemperature`), using
+ * the same words as the card's "All details": "Status", "Freezer · Target
+ * temperature", "Timer › Time left (min)". The resource is left out when the
+ * property already says it, as the card does for one-row groups.
+ */
+export function labelForPath(path: string): string {
+  const [resource, ...props] = parsePath(path);
+  if (!resource) return path;
+  const title = humanizeKey(resource.key);
+  const where = resource.location !== undefined ? `${locationLabel(resource.location)} · ` : "";
+  if (props.length === 0) return where + title;
+  const label = props
+    .map((p) => (p.location !== undefined ? `${locationLabel(p.location)} · ` : "") + propertyLabel(p.key))
+    .join(" › ");
+  return isSelfDescribing({ title, rows: [{ label, value: "" }] }) ? where + label : `${title} › ${where}${label}`;
+}
+
+/** The last property named in a path (what a value is formatted as): `a.b[X].c` -> "c". */
+export function pathKey(path: string): string {
+  return parsePath(path).at(-1)?.key ?? path;
+}
+
+// ---------------------------------------------------------------------------
 // At-a-glance summary
 
 export type Tone = "active" | "paused" | "done" | "idle" | "off" | "error";
@@ -370,10 +416,6 @@ function minutes(timer: Json, name: "remain" | "total"): number | undefined {
 /** Boolean flags that are worth showing as "on" chips, with their chip text. */
 const FEATURE_FLAG = /(Mode|Enabled|Fridge)$/;
 
-function clock(date: Date): string {
-  return date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-}
-
 /**
  * Pick the headline facts out of a device state. `now` is only used to say
  * when a running programme will finish.
@@ -419,7 +461,7 @@ export function summarize(state: Json, now: Date = new Date()): DeviceSummary {
       summary.highlights.push({
         label: "Time left",
         value: formatDuration(remaining),
-        ...(tone === "active" ? { hint: `ends ~${clock(end)}` } : {}),
+        ...(tone === "active" ? { hint: `ends ~${formatClock(end)}` } : {}),
       });
       if (total !== undefined && total > 0) {
         summary.progress = { remaining: Math.min(remaining, total), total };

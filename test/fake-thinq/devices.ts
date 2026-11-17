@@ -2,6 +2,11 @@
  * The fake appliances: a refrigerator and a dishwasher, with ThinQ-style
  * device info, profile and state, and a little behaviour behind control
  * commands so integration tests can exercise realistic flows.
+ *
+ * `simulate()` plays someone using the appliance (opening a door, pressing a
+ * button on its panel), so the state changes on its own the way a real one
+ * would - which the app picks up as device events. Simulated actions only
+ * produce states the device profile allows.
  */
 import {
   FakeThinQError,
@@ -61,7 +66,23 @@ export abstract class FakeDevice {
     mergeState(this.state, patch);
   }
 
+  /**
+   * Simulate someone using the appliance: one plausible action at time `now`,
+   * described in words, or null when nothing happens. `random` returns values
+   * in [0, 1). A disconnected appliance does nothing.
+   */
+  simulate(random: () => number, now: number): string | null {
+    if (!this.online) return null;
+    this.advance(now);
+    return this.act(random, now);
+  }
+
   protected abstract initialState(): Json;
+
+  /** The device-specific part of `simulate`. */
+  protected act(_random: () => number, _now: number): string | null {
+    return null;
+  }
 
   /** Let time-based behaviour catch up (e.g. a running cycle finishing). */
   protected advance(_now: number): void {}
@@ -137,6 +158,54 @@ export class FakeRefrigerator extends FakeDevice {
       refrigeration: { expressMode: false, expressFridge: false, freshAirFilter: "AUTO" },
       waterFilterInfo: { usedTime: 4, unit: "MONTH" },
     };
+  }
+
+  /** Simulation steps express fridge has been on for; it switches itself off. */
+  private expressSteps = 0;
+
+  override reset(): void {
+    this.expressSteps = 0;
+    super.reset();
+  }
+
+  /**
+   * Someone at the fridge: the door opens and closes again on the next step;
+   * express fridge is switched on at the panel and turns itself off after a
+   * few steps; the fridge compartment is nudged by a degree. In sabbath mode
+   * only the door moves (the panel is locked).
+   */
+  protected override act(random: () => number): string | null {
+    const door = (this.state.doorStatus as Json[]).find((d) => d.locationName === "MAIN")!;
+    if (door.doorState === "OPEN") {
+      door.doorState = "CLOSE";
+      return "door closed";
+    }
+    const refrigeration = this.state.refrigeration as Json;
+    if (refrigeration.expressFridge === true && ++this.expressSteps >= 3) {
+      refrigeration.expressFridge = false;
+      this.expressSteps = 0;
+      return "express fridge finished";
+    }
+    const sabbath = (this.state.sabbath as Json).sabbathMode === true;
+    const roll = random();
+    if (roll < 0.5 || sabbath) {
+      door.doorState = "OPEN";
+      return "door opened";
+    }
+    if (roll < 0.7 && refrigeration.expressFridge !== true) {
+      refrigeration.expressFridge = true;
+      this.expressSteps = 0;
+      return "express fridge switched on at the panel";
+    }
+    if (roll < 0.9) {
+      const fridge = (this.state.temperature as Json[]).find((t) => t.locationName === "FRIDGE")!;
+      const current = fridge.targetTemperature as number;
+      let next = current + (random() < 0.5 ? -1 : 1);
+      if (next < 1 || next > 7) next = current - (next - current); // bounce off the 1..7 range
+      fridge.targetTemperature = next;
+      return `fridge set to ${next} °C at the panel`;
+    }
+    return null;
   }
 
   protected override apply(changes: Change[], now: number): void {
@@ -280,10 +349,49 @@ export class FakeDishWasher extends FakeDevice {
     }
   }
 
+  /**
+   * Someone at the dishwasher: powers it on if it is off; opens the door
+   * (which cancels remote start, as on LG dishwashers) and closes it on the
+   * next step; enables remote start so the app can start it; or starts a
+   * short programme at the panel, which then runs to the end. A running
+   * programme is left alone.
+   */
+  protected override act(random: () => number, now: number): string | null {
+    const state = this.currentState;
+    if (state === "RUNNING") return null;
+    if (state === "POWER_OFF") {
+      (this.state.runState as Json).currentState = "INITIAL";
+      return "powered on at the panel";
+    }
+    const door = this.state.doorStatus as Json;
+    const remote = this.state.remoteControlEnable as Json;
+    if (door.doorState === "OPEN") {
+      door.doorState = "CLOSE";
+      return "door closed";
+    }
+    const roll = random();
+    if (roll < 0.4) {
+      door.doorState = "OPEN";
+      remote.remoteControlEnabled = false;
+      return "door opened";
+    }
+    if (roll < 0.7) {
+      const course = random() < 0.5 ? "QUICK" : "TURBO";
+      (this.state.dishWashingCourse as Json).currentDishWashingCourse = course;
+      this.beginCycle(course, now);
+      return `${course} programme started at the panel`;
+    }
+    if (roll < 0.9 && remote.remoteControlEnabled !== true) {
+      remote.remoteControlEnabled = true;
+      return "remote start enabled at the panel";
+    }
+    return null;
+  }
+
   private start(now: number): void {
     const state = this.currentState;
     if (state === "POWER_OFF") {
-      throw new FakeThinQError("COMMAND_NOT_SUPPORTED_IN_STATE", "The dishwasher is off; it must be powered on at the appliance");
+      throw new FakeThinQError("COMMAND_NOT_SUPPORTED_IN_POWER_OFF", "The dishwasher is off; it must be powered on at the appliance");
     }
     if ((this.state.remoteControlEnable as Json).remoteControlEnabled !== true) {
       throw new FakeThinQError("COMMAND_NOT_SUPPORTED_IN_REMOTE_OFF", "Remote start is not enabled on the appliance");
@@ -294,7 +402,10 @@ export class FakeDishWasher extends FakeDevice {
     if (state !== "INITIAL" && state !== "END") {
       throw new FakeThinQError("COMMAND_NOT_SUPPORTED_IN_STATE", `Cannot START while ${state}`);
     }
-    const course = (this.state.dishWashingCourse as Json).currentDishWashingCourse as string;
+    this.beginCycle((this.state.dishWashingCourse as Json).currentDishWashingCourse as string, now);
+  }
+
+  private beginCycle(course: string, now: number): void {
     const minutes = COURSE_MINUTES[course] ?? COURSE_MINUTES.AUTO;
     this.cycle = { startedAt: now, minutes };
     (this.state.runState as Json).currentState = "RUNNING";

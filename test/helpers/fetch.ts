@@ -1,11 +1,17 @@
 /**
- * A routing fetch() stub for web tests: `"METHOD /path"` -> handler. Unrouted
- * requests fail the test loudly. Every call is recorded.
+ * The fetch() stub for web tests: `"METHOD /path?query"` -> handler. Requests
+ * no route matches go to the fallback (e.g. FakeBackend) or, without one, fail
+ * the test loudly. Every call is recorded.
  */
 export interface FetchCall {
   method: string;
+  /** As passed to fetch(), e.g. "/api/events?limit=5". */
   url: string;
+  /** Path without the query string (still URL-encoded). */
+  path: string;
+  query: URLSearchParams;
   init: RequestInit;
+  /** The parsed JSON request body, if any. */
   body: unknown;
 }
 
@@ -26,17 +32,19 @@ export function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-export function installFetch(routes: Record<string, FetchHandler>) {
+export function installFetch(routes: Record<string, FetchHandler>, fallback?: FetchHandler) {
   const calls: FetchCall[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input);
+    const parsed = new URL(url, "http://localhost");
     const method = (init.method ?? "GET").toUpperCase();
-    const call: FetchCall = { method, url, init, body: typeof init.body === "string" ? JSON.parse(init.body) : undefined };
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+    const call: FetchCall = { method, url, path: parsed.pathname, query: parsed.searchParams, init, body };
     calls.push(call);
-    const path = url.replace(/^https?:\/\/[^/]+/, "");
-    const handler = routes[`${method} ${path}`];
-    if (!handler) throw new Error(`Unexpected fetch: ${method} ${path}`);
+    const target = url.replace(/^https?:\/\/[^/]+/, "");
+    const handler = routes[`${method} ${target}`] ?? fallback;
+    if (!handler) throw new Error(`Unexpected fetch: ${method} ${target}`);
     return handler(call);
   }) as typeof fetch;
   return {

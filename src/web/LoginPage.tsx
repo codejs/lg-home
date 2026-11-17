@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type User } from "./api";
+import { queryKeys } from "./queries";
 
 /** Credential gate: nothing else in the app renders until this succeeds. */
 export function LoginPage() {
@@ -13,7 +14,7 @@ export function LoginPage() {
     onSuccess: (user: User) => {
       setPassword("");
       // Hand the user to the app shell, which swaps in the devices page.
-      queryClient.setQueryData(["me"], user);
+      queryClient.setQueryData(queryKeys.me, user);
     },
   });
 

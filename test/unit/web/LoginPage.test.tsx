@@ -3,13 +3,15 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { LoginPage } from "../../../src/web/LoginPage.js";
+import { queryKeys } from "../../../src/web/queries.js";
+import { newQueryClient } from "../../helpers/fake-backend.js";
 import { deferred, installFetch, json, type FetchHandler } from "../../helpers/fetch.js";
 
 function renderLogin(loginHandler: FetchHandler) {
   const fetchStub = installFetch({ "POST /api/auth/login": loginHandler });
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+  const queryClient = newQueryClient();
   render(
     <QueryClientProvider client={queryClient}>
       <LoginPage />
@@ -92,7 +94,7 @@ describe("LoginPage", () => {
     await user.click(submit);
     const alert = await screen.findByRole("alert");
     assert.equal(alert.textContent, "Invalid username or password");
-    assert.equal(queryClient.getQueryData(["me"]), undefined, "not signed in");
+    assert.equal(queryClient.getQueryData(queryKeys.me), undefined, "not signed in");
     assert.equal(username.disabled, false, "form usable again");
     assert.equal(submit.disabled, false);
   });
@@ -158,7 +160,7 @@ describe("LoginPage", () => {
     await user.type(username, "alice");
     await user.type(password, "secret123");
     await user.click(submit);
-    await waitFor(() => assert.deepEqual(queryClient.getQueryData(["me"]), { id: 7, username: "alice" }));
+    await waitFor(() => assert.deepEqual(queryClient.getQueryData(queryKeys.me), { id: 7, username: "alice" }));
     assert.equal(password.value, "", "password cleared from component state");
   });
 

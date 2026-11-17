@@ -5,11 +5,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-name=$(node -p "require('./package.json').name")
-version=$(node -p "require('./package.json').version")
+#name=$(node -p "require('./package.json').name")
+#version=$(node -p "require('./package.json').version")
 stamp=$(date +%Y%m%d-%H%M%S)
 outdir=archive
-out="$outdir/$name-$version-$stamp.zip"
+out="$outdir/lg-home.zip"
 
 mkdir -p "$outdir"
 

@@ -4,92 +4,34 @@
  * with the add_user CLI, and drives the HTTP API the way the SPA does.
  */
 import assert from "node:assert/strict";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { createServer } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
 import { after, before, describe, it } from "node:test";
 import { DISHWASHER_ID, FRIDGE_ID } from "../fake-thinq/devices.js";
 import { FakeThinQ } from "../fake-thinq/server.js";
+import { ApiClient, startAppServer, type AppServer } from "../helpers/app-server.js";
 
-const run = promisify(execFile);
-const ROOT = join(import.meta.dirname, "../..");
 const MINUTE = 60_000;
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address() as { port: number };
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 describe("server against the fake ThinQ API", () => {
   let clock = Date.parse("2026-01-01T08:00:00Z");
   const fake = new FakeThinQ({ accessToken: "pat-test", now: () => clock });
-  const dataDir = mkdtempSync(join(tmpdir(), "lg-home-test-"));
-  const env = { ...process.env, DATABASE_PATH: join(dataDir, "test.db"), LOG_LEVEL: "error" };
-  let server: ChildProcess;
-  let base = "";
-  let cookie = "";
-
-  async function api(path: string, init: RequestInit = {}) {
-    const headers: Record<string, string> = {};
-    if (init.body) headers["Content-Type"] = "application/json";
-    if (cookie) headers.Cookie = cookie;
-    const res = await fetch(`${base}${path}`, { ...init, headers });
-    const text = await res.text();
-    return { res, status: res.status, body: text ? JSON.parse(text) : null };
-  }
+  let server: AppServer;
+  let client: ApiClient;
+  const api = (path: string, init?: Parameters<ApiClient["request"]>[1]) => client.request(path, init);
 
   const control = (id: string, command: unknown) =>
     api(`/api/devices/${id}/control`, { method: "POST", body: JSON.stringify(command) });
 
   before(async () => {
     await fake.listen();
-
+    server = await startAppServer(fake.url);
     // Provision the login with the admin CLI, exactly as an operator would.
-    const cli = await run(
-      process.execPath,
-      ["--import", "tsx", "src/server/cli/add-user.ts", "alice", "--password", "secret123"],
-      { cwd: ROOT, env },
-    );
-    assert.match(cli.stdout, /Created user "alice"/);
-
-    const port = await freePort();
-    base = `http://127.0.0.1:${port}`;
-    server = spawn(process.execPath, ["--import", "tsx", "src/server/index.ts"], {
-      cwd: ROOT,
-      env: {
-        ...env,
-        PORT: String(port),
-        THINQ_ACCESS_TOKEN: "pat-test",
-        THINQ_COUNTRY_CODE: "US",
-        THINQ_API_BASE_URL: fake.url,
-      },
-      stdio: ["ignore", "inherit", "inherit"],
-    });
-
-    for (let i = 0; i < 100; i++) {
-      try {
-        await fetch(`${base}/api/auth/me`);
-        return;
-      } catch {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    }
-    throw new Error("server did not start");
+    assert.match(await server.addUser("alice", "secret123"), /Created user "alice"/);
+    client = new ApiClient(server.base);
   });
 
   after(async () => {
-    server?.kill();
+    await server?.stop();
     await fake.close();
-    rmSync(dataDir, { recursive: true, force: true });
   });
 
   describe("authentication", () => {
@@ -125,7 +67,7 @@ describe("server against the fake ThinQ API", () => {
       assert.match(setCookie, /^lg_home_session=[^;]+/);
       assert.match(setCookie, /HttpOnly/);
       assert.match(setCookie, /SameSite=Lax/);
-      cookie = setCookie.split(";")[0];
+      client.cookie = setCookie.split(";")[0];
       assert.equal((await api("/api/auth/me")).body.user.username, "alice");
     });
   });

@@ -1,19 +1,23 @@
-import { useId } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ApiError, THINQ_NOT_CONNECTED, api, type Device } from "./api";
+import { useId, type ReactNode } from "react";
+import { ApiError, THINQ_NOT_CONNECTED, type Device } from "./api";
 import { DeviceIcon } from "./DeviceIcon";
 import { deviceTypeLabel, describeState, summarize, type DeviceSummary } from "./deviceFormat";
+import { useDeviceStatus } from "./queries";
+import { formatClock } from "./time";
 
-/** How often each card refreshes its live status (every refresh is also stored as history). */
-export const STATUS_REFRESH_MS = 60_000;
+export interface DeviceCardProps {
+  device: Device;
+  /** Small labels beside the name, e.g. a "Watching" badge. */
+  badges?: ReactNode;
+  /** Extra buttons in the footer, before Refresh. */
+  actions?: ReactNode;
+  /** Emphasise the card, e.g. while a panel about it is open. */
+  highlighted?: boolean;
+}
 
 /** One appliance: identity, headline state, key figures, alerts, and full details on demand. */
-export function DeviceCard({ device }: { device: Device }) {
-  const status = useQuery({
-    queryKey: ["status", device.id],
-    queryFn: () => api.status(device.id),
-    refetchInterval: STATUS_REFRESH_MS,
-  });
+export function DeviceCard({ device, badges, actions, highlighted = false }: DeviceCardProps) {
+  const status = useDeviceStatus(device.id);
   // Not derived from device.id: aria-labelledby is a space-separated id list.
   const titleId = useId();
   const offline = status.error instanceof ApiError && status.error.thinqCode === THINQ_NOT_CONNECTED;
@@ -25,11 +29,19 @@ export function DeviceCard({ device }: { device: Device }) {
     .join(" · ");
 
   return (
-    <article className="device-card" aria-labelledby={titleId} aria-busy={status.isFetching}>
+    <article
+      className={highlighted ? "device-card selected" : "device-card"}
+      aria-labelledby={titleId}
+      aria-busy={status.isFetching}
+    >
       <header className="device-card-header">
         <DeviceIcon type={device.type} />
         <div className="device-card-title">
-          <h2 id={titleId}>{device.alias}</h2>
+          {/* Badges sit beside the name, outside the heading that names the card. */}
+          <div className="device-card-name">
+            <h2 id={titleId}>{device.alias}</h2>
+            {badges}
+          </div>
           {subtitle && <p className="muted">{subtitle}</p>}
         </div>
         {offline ? (
@@ -56,17 +68,20 @@ export function DeviceCard({ device }: { device: Device }) {
 
       <footer className="device-card-footer">
         <span className="muted">
-          {status.dataUpdatedAt ? `Updated ${formatTime(status.dataUpdatedAt)}` : "\u00a0"}
+          {status.dataUpdatedAt ? `Updated ${formatClock(status.dataUpdatedAt)}` : "\u00a0"}
         </span>
-        <button
-          type="button"
-          className="link-button"
-          onClick={() => status.refetch()}
-          disabled={status.isFetching}
-          aria-label={`Refresh ${device.alias}`}
-        >
-          {status.isFetching ? "Refreshing…" : "Refresh"}
-        </button>
+        <span className="device-card-actions">
+          {actions}
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => status.refetch()}
+            disabled={status.isFetching}
+            aria-label={`Refresh ${device.alias}`}
+          >
+            {status.isFetching ? "Refreshing…" : "Refresh"}
+          </button>
+        </span>
       </footer>
     </article>
   );
@@ -157,8 +172,4 @@ function Progress({ remaining, total }: { remaining: number; total: number }) {
       <div style={{ width: `${done}%` }} />
     </div>
   );
-}
-
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 }

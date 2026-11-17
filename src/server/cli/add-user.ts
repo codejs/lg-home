@@ -6,10 +6,13 @@
  *   npm run add_user -- <username> --force              # overwrite an existing user
  *
  * The password can also be piped in (`echo secret | npm run add_user -- alice`)
- * or passed via the ADD_USER_PASSWORD environment variable.
+ * or passed via the ADD_USER_PASSWORD environment variable. Of the server's
+ * settings only DATABASE_PATH is used, so a setting the CLI doesn't need
+ * can't stop it.
  */
 import { createInterface } from "node:readline";
-import { runMigrations } from "../db/index.js";
+import { databasePathFromEnv } from "../config.js";
+import { openDatabase, runMigrations } from "../db/index.js";
 import { UserInputError, provisionUser, validateUsername } from "../users.js";
 import { USAGE, UsageError, firstLine, parseArgs, type AddUserArgs } from "./args.js";
 
@@ -56,7 +59,9 @@ async function main(): Promise<void> {
   }
   validateUsername(args.username!); // fail before asking for a password
   const password = await resolvePassword(args);
-  // The CLI can run before the server ever started, so make sure the schema exists.
+  // Only now touch the database. The CLI can run before the server ever
+  // started, so make sure the schema exists.
+  openDatabase(databasePathFromEnv());
   runMigrations();
   const result = await provisionUser({ username: args.username!, password, force: args.force });
   console.log(

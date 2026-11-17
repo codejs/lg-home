@@ -1,15 +1,20 @@
-export interface Device {
-  id: string;
-  type: string;
-  alias: string;
-  modelName: string | null;
-  reportable: boolean | null;
-  updatedAt: string;
-}
+// The API's data types are shared with the server (see src/shared/api.ts).
+import type {
+  Device,
+  DeviceEvent,
+  EventKind,
+  PollerStatus,
+  StateChange,
+  Subscription,
+  SubscriptionsResponse,
+  User,
+} from "../shared/api";
 
-export interface User {
-  id: number;
-  username: string;
+export type { Device, DeviceEvent, EventKind, PollerStatus, StateChange, Subscription, SubscriptionsResponse, User };
+
+export interface EventFilter {
+  deviceId?: string;
+  kind?: EventKind;
 }
 
 export class ApiError extends Error {
@@ -38,6 +43,11 @@ let onUnauthorized: (() => void) | undefined;
 
 export function setUnauthorizedHandler(handler: () => void) {
   onUnauthorized = handler;
+}
+
+/** Report a session that ended outside a normal API call (e.g. the event stream). */
+export function notifyUnauthorized() {
+  onUnauthorized?.();
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -82,4 +92,32 @@ export const api = {
   status: (id: string) => request<Record<string, unknown>>(`/api/devices/${encodeURIComponent(id)}/status`),
   control: (id: string, command: Record<string, unknown>) =>
     request(`/api/devices/${encodeURIComponent(id)}/control`, { method: "POST", body: JSON.stringify(command) }),
+
+  subscriptions: () => request<SubscriptionsResponse>("/api/subscriptions"),
+  subscribe: (id: string) => request<Subscription>(`/api/devices/${encodeURIComponent(id)}/subscription`, { method: "PUT" }),
+  unsubscribe: (id: string) =>
+    request<null>(`/api/devices/${encodeURIComponent(id)}/subscription`, { method: "DELETE" }),
+  /**
+   * Event history, newest first. Page backwards with `before` = the smallest
+   * id seen, or jump with `offset` (pinned below a fixed id by `before`).
+   */
+  events: (query: EventFilter & { before?: number; offset?: number; limit?: number } = {}) =>
+    request<DeviceEvent[]>(`/api/events${eventQuery(query)}`),
+  /** How many events match (same filters as `events`). */
+  countEvents: (query: EventFilter & { before?: number } = {}) =>
+    request<{ total: number }>(`/api/events/count${eventQuery(query)}`),
 };
+
+function eventQuery(query: EventFilter & { before?: number; offset?: number; limit?: number }): string {
+  const params = new URLSearchParams();
+  if (query.deviceId) params.set("deviceId", query.deviceId);
+  if (query.kind) params.set("kind", query.kind);
+  if (query.before !== undefined) params.set("before", String(query.before));
+  if (query.offset) params.set("offset", String(query.offset));
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
+/** Where the browser opens the live event stream (Server-Sent Events). */
+export const EVENT_STREAM_URL = "/api/events/stream";

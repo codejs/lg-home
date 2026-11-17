@@ -4,14 +4,14 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { scryptSync, timingSafeEqual } from "node:crypto";
 import Database from "better-sqlite3";
+import { ROOT } from "../helpers/app-server.js";
 
-const ROOT = join(import.meta.dirname, "../..");
 const dir = mkdtempSync(join(tmpdir(), "lg-home-cli-"));
 const dbPath = join(dir, "cli.db");
 
@@ -63,9 +63,40 @@ describe("add_user CLI", () => {
   after(() => rmSync(dir, { recursive: true, force: true }));
 
   it("--help prints usage and exits 0 without touching the database", async () => {
-    const res = await addUser(["--help"]);
+    const untouched = join(dir, "help", "untouched.db");
+    const res = await addUser(["--help"], { env: { DATABASE_PATH: untouched } });
     assert.equal(res.code, 0);
     assert.match(res.stdout, /Usage: npm run add_user/);
+    assert.equal(existsSync(untouched), false, "no database file created");
+  });
+
+  it("doesn't create a database for invalid input either", async () => {
+    const untouched = join(dir, "invalid", "untouched.db");
+    const res = await addUser(["x", "--password", "secret123"], { env: { DATABASE_PATH: untouched } });
+    assert.equal(res.code, 1);
+    assert.equal(existsSync(untouched), false);
+  });
+
+  it("ignores server settings it doesn't use, even invalid ones", async () => {
+    const own = join(dir, "own.db");
+    const res = await addUser(["carol", "--password", "secret123"], {
+      env: {
+        DATABASE_PATH: own,
+        SESSION_TTL_HOURS: "forever",
+        EVENT_POLL_INTERVAL_SECONDS: "1",
+        PORT: "http",
+        COOKIE_SECURE: "maybe",
+        LOG_LEVEL: "loud",
+      },
+    });
+    assert.equal(res.code, 0, res.stderr);
+    assert.match(res.stdout, /Created user "carol"/);
+    const db = new Database(own, { readonly: true });
+    try {
+      assert.deepEqual(db.prepare("SELECT username FROM users").all(), [{ username: "carol" }]);
+    } finally {
+      db.close();
+    }
   });
 
   it("creates a user with --password", async () => {

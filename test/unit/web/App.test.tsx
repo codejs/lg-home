@@ -6,6 +6,8 @@ import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import { App } from "../../../src/web/App.js";
 import { createQueryClient } from "../../../src/web/queryClient.js";
+import { queryKeys } from "../../../src/web/queries.js";
+import { NO_SUBSCRIPTIONS } from "../../helpers/fake-backend.js";
 import { deferred, installFetch, json, type FetchHandler } from "../../helpers/fetch.js";
 
 const ALICE = { id: 1, username: "alice" };
@@ -15,8 +17,13 @@ let restore: (() => void) | undefined;
 let queryClient: QueryClient;
 
 function renderApp(routes: Record<string, FetchHandler>) {
-  // Device cards load their own status; give them one unless a test overrides it.
-  const fetchStub = installFetch({ "GET /api/devices/d1/status": () => json(200, {}), ...routes });
+  // Device cards load their own status, and the devices page which devices are
+  // watched; answer both unless a test overrides them.
+  const fetchStub = installFetch({
+    "GET /api/devices/d1/status": () => json(200, {}),
+    "GET /api/subscriptions": () => json(200, NO_SUBSCRIPTIONS),
+    ...routes,
+  });
   restore = fetchStub.restore;
   queryClient = createQueryClient({ defaultOptions: { queries: { gcTime: Infinity } } });
   render(
@@ -105,7 +112,7 @@ describe("App (auth gate)", () => {
     await screen.findByText("Kitchen Fridge");
     await user.click(screen.getByRole("button", { name: "Sign out" }));
     await screen.findByLabelText("Password");
-    assert.equal(queryClient.getQueryData(["devices"]), undefined, "device data not kept for the next user");
+    assert.equal(queryClient.getQueryData(queryKeys.devices), undefined, "device data not kept for the next user");
     assertAbsent(screen.queryByText("Kitchen Fridge"), "stale device card");
   });
 
@@ -136,7 +143,7 @@ describe("App (auth gate)", () => {
     await user.click(screen.getByRole("button", { name: "Sync from ThinQ" }));
     await screen.findByLabelText("Password");
     assert.ok(expired);
-    assert.equal(queryClient.getQueryData(["devices"]), undefined);
+    assert.equal(queryClient.getQueryData(queryKeys.devices), undefined);
   });
 
   it("a different user signing in afterwards sees only their own name", async () => {

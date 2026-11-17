@@ -1,0 +1,137 @@
+/* Theme, page layout and shared elements (buttons, forms, text, errors). */
+
+:root {
+  --bg: #f7f7f8;
+  --fg: #1d1d1f;
+  --muted: #6e6e73;
+  --card: #ffffff;
+  --border: #e3e3e6;
+  --accent: #a50034;
+  --error: #c62828;
+  --ok: #1b7f3b;
+  --warn: #a15c00;
+  --info: #1f5fbf;
+  --accent-soft: #a5003414;
+  --ok-soft: #1b7f3b1a;
+  --warn-soft: #ffb2001f;
+  --info-soft: #1f5fbf17;
+  --error-soft: #c628281a;
+  --neutral-soft: #0000000d;
+  font-family: system-ui, -apple-system, sans-serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111113;
+    --fg: #f2f2f4;
+    --muted: #9a9aa0;
+    --card: #1c1c1f;
+    --border: #2e2e33;
+    --accent: #ff4d7d;
+    --error: #ff6b6b;
+    --ok: #5fd38a;
+    --warn: #ffc15e;
+    --info: #7fb0ff;
+    --accent-soft: #ff4d7d1f;
+    --ok-soft: #5fd38a1f;
+    --warn-soft: #ffc15e1f;
+    --info-soft: #7fb0ff1f;
+    --error-soft: #ff6b6b1f;
+    --neutral-soft: #ffffff14;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+header h1 {
+  margin: 0;
+  white-space: nowrap;
+}
+
+main > header {
+  margin-bottom: 4px;
+}
+
+button {
+  white-space: nowrap;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: var(--card);
+  color: var(--fg);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* The main call to action (sign in, watch a device). */
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+select {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+}
+
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+pre {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow: auto;
+  font-size: 0.8125rem;
+}
+
+.error {
+  color: var(--error);
+}

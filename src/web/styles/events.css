@@ -1,0 +1,168 @@
+/* Device events: the panel below the device grid */
+.device-events {
+  margin-top: 20px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.device-events h2 {
+  margin: 0;
+  font-size: 1.0625rem;
+  overflow-wrap: anywhere;
+}
+
+.device-events > button {
+  margin-top: 12px;
+}
+
+/* Event pages */
+.page-summary {
+  margin: 12px 0 0;
+  font-size: 0.875rem;
+}
+
+.page-loading {
+  opacity: 0.6;
+}
+
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.pagination button {
+  min-width: 40px;
+  padding: 6px 10px;
+}
+
+.pagination button.active {
+  border-color: var(--accent);
+  font-weight: 600;
+  cursor: default;
+}
+
+.newer-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 8px 8px 8px 14px;
+  background: var(--card);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.toolbar .field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar label {
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.stream-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.stream-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.stream-status.stream-open .dot {
+  background: var(--accent);
+}
+
+.stream-status.stream-closed {
+  color: var(--error);
+}
+
+.stream-status.stream-closed .dot {
+  background: var(--error);
+}
+
+.events {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.event {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.event-state .badge {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.event-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.event-head time {
+  margin-left: auto;
+  font-size: 0.875rem;
+}
+
+.event-lines {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.event-lines li {
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.event .event-more {
+  margin: 4px 0 0;
+  font-size: 0.8125rem;
+}
+
+.event details {
+  margin-top: 8px;
+}
+
+.event summary {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.event details pre {
+  margin: 8px 0 0;
+  background: var(--bg);
+}

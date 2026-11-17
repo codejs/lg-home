@@ -212,6 +212,48 @@ describe("auth routes", () => {
   });
 });
 
+describe("configured settings reach the auth routes", () => {
+  let app: FastifyInstance | undefined;
+  beforeEach(async () => {
+    resetDb();
+    await createUser("alice", "secret123");
+  });
+  afterEach(() => app?.close());
+
+  const maxAge = (header: string) => Number(/Max-Age=(\d+)/.exec(header)?.[1]);
+  const signIn = (a: FastifyInstance) => a.inject({ ...LOGIN, payload: { username: "alice", password: "secret123" } });
+
+  it("SESSION_TTL_HOURS: the cookie and the stored session expire after the configured lifetime", async () => {
+    ({ app } = await buildTestApp({ sessionTtlMs: 2 * 60 * 60 * 1000 }));
+    const before = Date.now();
+    const res = await signIn(app);
+    const age = maxAge(String(res.headers["set-cookie"]));
+    assert.ok(age >= 7199 && age <= 7200, `Max-Age ${age}`);
+    const session = db.select().from(schema.sessions).get()!;
+    const lifetime = session.expiresAt.getTime() - before;
+    assert.ok(lifetime > 7_190_000 && lifetime <= 7_201_000, `lifetime ${lifetime} ms`);
+  });
+
+  it("without a setting, a login lasts 7 days", async () => {
+    ({ app } = await buildTestApp());
+    const age = maxAge(String((await signIn(app)).headers["set-cookie"]));
+    assert.ok(age >= 7 * 24 * 3600 - 1 && age <= 7 * 24 * 3600, `Max-Age ${age}`);
+  });
+
+  it("COOKIE_SECURE=true: Secure cookies even over plain HTTP (behind an HTTPS proxy)", async () => {
+    ({ app } = await buildTestApp({ cookieSecure: true }));
+    const res = await signIn(app);
+    assert.match(String(res.headers["set-cookie"]), /; Secure/);
+    const out = await app.inject({ method: "POST", url: "/api/auth/logout", headers: { cookie: cookiePair(res) } });
+    assert.match(String(out.headers["set-cookie"]), /Max-Age=0.*; Secure/);
+  });
+
+  it("COOKIE_SECURE unset: plain HTTP gets no Secure flag", async () => {
+    ({ app } = await buildTestApp({ cookieSecure: null }));
+    assert.doesNotMatch(String((await signIn(app)).headers["set-cookie"]), /Secure/);
+  });
+});
+
 describe("login throttling over HTTP", () => {
   let app: FastifyInstance;
   let now = 0;

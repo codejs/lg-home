@@ -1,6 +1,6 @@
 import "../../helpers/test-db.js";
 import assert from "node:assert/strict";
-import { afterEach, describe, it } from "node:test";
+import { describe, it } from "node:test";
 import type { FastifyRequest } from "fastify";
 import {
   SESSION_COOKIE,
@@ -118,29 +118,28 @@ describe("clearedSessionCookie", () => {
 });
 
 describe("isSecureRequest", () => {
-  const original = process.env.COOKIE_SECURE;
-  afterEach(() => {
-    if (original === undefined) delete process.env.COOKIE_SECURE;
-    else process.env.COOKIE_SECURE = original;
-  });
-
-  it("follows the request protocol by default", () => {
-    delete process.env.COOKIE_SECURE;
+  it("follows the request protocol when not configured (null)", () => {
     assert.equal(isSecureRequest(fakeRequest({ protocol: "https" })), true);
     assert.equal(isSecureRequest(fakeRequest({ protocol: "http" })), false);
+    assert.equal(isSecureRequest(fakeRequest({ protocol: "https" }), null), true);
   });
 
-  it("COOKIE_SECURE=true/1 forces Secure (app behind an HTTPS proxy)", () => {
-    for (const value of ["true", "1"]) {
-      process.env.COOKIE_SECURE = value;
-      assert.equal(isSecureRequest(fakeRequest({ protocol: "http" })), true, value);
-    }
+  it("COOKIE_SECURE=true forces Secure (app behind an HTTPS proxy)", () => {
+    assert.equal(isSecureRequest(fakeRequest({ protocol: "http" }), true), true);
   });
 
-  it("COOKIE_SECURE=false/0 disables it", () => {
-    for (const value of ["false", "0"]) {
-      process.env.COOKIE_SECURE = value;
-      assert.equal(isSecureRequest(fakeRequest({ protocol: "https" })), false, value);
+  it("COOKIE_SECURE=false disables it", () => {
+    assert.equal(isSecureRequest(fakeRequest({ protocol: "https" }), false), false);
+  });
+
+  it("no longer reads the environment per request: the setting is checked once at startup", () => {
+    const original = process.env.COOKIE_SECURE;
+    process.env.COOKIE_SECURE = "true";
+    try {
+      assert.equal(isSecureRequest(fakeRequest({ protocol: "http" })), false);
+    } finally {
+      if (original === undefined) delete process.env.COOKIE_SECURE;
+      else process.env.COOKIE_SECURE = original;
     }
   });
 });

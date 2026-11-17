@@ -1,14 +1,16 @@
 import { assertAbsent } from "../../helpers/dom.js";
 import assert from "node:assert/strict";
-import { afterEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { DeviceCard } from "../../../src/web/DeviceCard.js";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { DeviceCard, type DeviceCardProps } from "../../../src/web/DeviceCard.js";
 import { deviceFamily } from "../../../src/web/DeviceIcon.js";
 import type { Device } from "../../../src/web/api.js";
 import { FakeDishWasher, FakeRefrigerator } from "../../fake-thinq/devices.js";
+import { newQueryClient } from "../../helpers/fake-backend.js";
 import { deferred, installFetch, json, type FetchHandler } from "../../helpers/fetch.js";
+import { setBrowserLanguages } from "../../helpers/locale.js";
 
 const FRIDGE: Device = {
   id: "f1",
@@ -16,6 +18,7 @@ const FRIDGE: Device = {
   alias: "Kitchen Fridge",
   modelName: "GBB92STAXP",
   reportable: true,
+  raw: null,
   updatedAt: "",
 };
 const DISHWASHER: Device = { ...FRIDGE, id: "dw1", type: "DEVICE_DISH_WASHER", alias: "Dishwasher", modelName: "DFB532FP" };
@@ -35,13 +38,13 @@ function runningDishwasher(minutesIn: number) {
 
 let restore: (() => void) | undefined;
 
-function renderCard(device: Device, status: FetchHandler) {
+function renderCard(device: Device, status: FetchHandler, props: Omit<DeviceCardProps, "device"> = {}) {
   const fetchStub = installFetch({ [`GET /api/devices/${encodeURIComponent(device.id)}/status`]: status });
   restore = fetchStub.restore;
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+  const queryClient = newQueryClient();
   render(
     <QueryClientProvider client={queryClient}>
-      <DeviceCard device={device} />
+      <DeviceCard device={device} {...props} />
     </QueryClientProvider>,
   );
   const card = () => screen.getByRole("article", { name: device.alias });
@@ -49,11 +52,21 @@ function renderCard(device: Device, status: FetchHandler) {
 }
 
 const pill = (card: HTMLElement) => card.querySelector(".status-pill");
+/** "Updated …" in the card's footer. */
+const updated = (card: HTMLElement) => card.querySelector(".device-card-footer .muted")?.textContent ?? "";
+/** The end-time hint next to "Time left". */
+const endsHint = (card: HTMLElement) => card.querySelector(".device-highlights small")?.textContent?.trim() ?? "";
+/** Wait until the card's status has loaded (the footer then says when). */
+const loaded = (card: () => HTMLElement) => waitFor(() => assert.match(card().textContent ?? "", /Updated/));
 
 describe("DeviceCard", () => {
+  let restoreLanguages: (() => void) | undefined;
+  // Times are shown in the browser's locale; most tests use a 24-hour one.
+  beforeEach(() => (restoreLanguages = setBrowserLanguages("en-GB")));
   afterEach(() => {
     cleanup();
     restore?.();
+    restoreLanguages?.();
   });
 
   describe("identity", () => {
@@ -132,7 +145,7 @@ describe("DeviceCard", () => {
       assert.equal((bar.firstElementChild as HTMLElement).style.width, "44%");
       assert.equal(pill(card())?.textContent, "Running");
       assert.equal(pill(card())?.getAttribute("data-tone"), "active");
-      assert.match(card().querySelector(".device-highlights")?.textContent ?? "", /Time left1 h 15 min ends ~\d\d:\d\d/);
+      assert.match(card().querySelector(".device-highlights")?.textContent ?? "", /Time left1 h 15 min ends ~\d{1,2}:\d\d/);
     });
 
     it("finished dishwasher: done pill and no progress bar", async () => {
@@ -161,7 +174,7 @@ describe("DeviceCard", () => {
 
     it("an empty state still renders a tidy card", async () => {
       const { card } = renderCard(FRIDGE, () => json(200, {}));
-      await waitFor(() => assert.match(card().textContent ?? "", /Updated \d\d:\d\d/));
+      await waitFor(() => assert.match(updated(card()), /^Updated \d{1,2}:\d\d$/));
       assertAbsent(card().querySelector(".device-details"), "details section");
     });
   });
@@ -196,7 +209,7 @@ describe("DeviceCard", () => {
       const { card, user, fetchStub } = renderCard(FRIDGE, () => json(200, fridgeState({ temperature: [{ locationName: "FRIDGE", targetTemperature: ++calls + 1 }] })));
       const fridgeHighlight = () => card().querySelector(".device-highlights dd")?.textContent;
       await waitFor(() => assert.equal(fridgeHighlight(), "2 °C"));
-      assert.match(card().textContent ?? "", /Updated \d\d:\d\d/);
+      assert.match(updated(card()), /^Updated \d{1,2}:\d\d$/);
       const button = within(card()).getByRole("button", { name: "Refresh Kitchen Fridge" });
       await user.click(button);
       await waitFor(() => assert.equal(fridgeHighlight(), "3 °C"));
@@ -212,6 +225,59 @@ describe("DeviceCard", () => {
       pending.resolve(json(200, {}));
       await waitFor(() => assert.equal(button.disabled, false));
       assert.equal(button.textContent, "Refresh");
+    });
+  });
+
+  describe("times follow the browser's locale", () => {
+    it("24-hour clock for en-GB", async () => {
+      const { card } = renderCard(DISHWASHER, () => json(200, runningDishwasher(60)));
+      await waitFor(() => assert.match(updated(card()), /^Updated \d{1,2}:\d\d$/));
+      assert.match(endsHint(card()), /^ends ~\d{1,2}:\d\d$/);
+    });
+
+    it("12-hour clock for en-US, on both the update time and the end time", async () => {
+      restoreLanguages?.();
+      restoreLanguages = setBrowserLanguages("en-US");
+      const { card } = renderCard(DISHWASHER, () => json(200, runningDishwasher(60)));
+      await waitFor(() => assert.match(updated(card()), /^Updated \d{1,2}:\d\d\s[AP]M$/));
+      assert.match(endsHint(card()), /^ends ~\d{1,2}:\d\d\s[AP]M$/);
+    });
+  });
+
+  describe("slots", () => {
+    it("shows badges beside the name without changing the card's name", async () => {
+      const { card } = renderCard(FRIDGE, () => json(200, fridgeState()), { badges: <span className="badge">Watching</span> });
+      const badge = within(card()).getByText("Watching");
+      assert.ok(badge.parentElement!.classList.contains("device-card-name"));
+      assert.equal(card().querySelector("h2")!.textContent, "Kitchen Fridge", "the badge is not part of the heading");
+      assert.ok(screen.getByRole("article", { name: "Kitchen Fridge" }));
+    });
+
+    it("puts extra actions in the footer, before Refresh", async () => {
+      let clicks = 0;
+      const { card, user } = renderCard(FRIDGE, () => json(200, fridgeState()), {
+        actions: (
+          <button type="button" onClick={() => clicks++}>
+            Events
+          </button>
+        ),
+      });
+      await loaded(card);
+      const footer = card().querySelector("footer")!;
+      assert.deepEqual([...footer.querySelectorAll("button")].map((b) => b.textContent), ["Events", "Refresh"]);
+      await user.click(within(card()).getByRole("button", { name: "Events" }));
+      assert.equal(clicks, 1);
+    });
+
+    it("is highlighted only when asked, and has no extras by default", async () => {
+      const { card } = renderCard(FRIDGE, () => json(200, fridgeState()), { highlighted: true });
+      assert.ok(card().classList.contains("selected"));
+      cleanup();
+      const plain = renderCard(FRIDGE, () => json(200, fridgeState()));
+      await loaded(plain.card);
+      assert.ok(!plain.card().classList.contains("selected"));
+      assertAbsent(plain.card().querySelector(".badge"), "badge");
+      assert.deepEqual([...plain.card().querySelectorAll("footer button")].map((b) => b.textContent), ["Refresh"]);
     });
   });
 
@@ -241,7 +307,7 @@ describe("DeviceCard", () => {
         "GET /api/devices/f2/status": () => json(200, {}),
       });
       restore = fetchStub.restore;
-      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+      const queryClient = newQueryClient();
       render(
         <QueryClientProvider client={queryClient}>
           <DeviceCard device={FRIDGE} />

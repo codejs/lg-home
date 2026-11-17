@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { DevicesPage } from "../../../src/web/DevicesPage.js";
 import type { Device } from "../../../src/web/api.js";
+import { NO_SUBSCRIPTIONS, newQueryClient } from "../../helpers/fake-backend.js";
 import { deferred, installFetch, json, type FetchHandler } from "../../helpers/fetch.js";
 
 const device = (id: string, alias: string, type: string): Device => ({
@@ -14,6 +15,7 @@ const device = (id: string, alias: string, type: string): Device => ({
   alias,
   modelName: null,
   reportable: true,
+  raw: null,
   updatedAt: "2026-01-01T00:00:00Z",
 });
 const FRIDGE = device("f1", "Kitchen Fridge", "DEVICE_REFRIGERATOR");
@@ -27,10 +29,11 @@ function renderPage(routes: Record<string, FetchHandler>) {
   const fetchStub = installFetch({
     "GET /api/devices/f1/status": () => json(200, FRIDGE_STATE),
     "GET /api/devices/dw1/status": () => json(200, DISHWASHER_STATE),
+    "GET /api/subscriptions": () => json(200, NO_SUBSCRIPTIONS),
     ...routes,
   });
   restore = fetchStub.restore;
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+  const queryClient = newQueryClient();
   render(
     <QueryClientProvider client={queryClient}>
       <DevicesPage user={{ id: 1, username: "alice" }} />

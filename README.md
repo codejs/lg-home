@@ -21,35 +21,48 @@ Production: `npm run build && npm start` (serves the API and SPA on :3000).
 ## Tests
 
 ```sh
-npm test                  # everything (~30 s)
+npm test                  # everything
 npm run test:unit         # fast, in-process: no ports, no subprocesses
 npm run test:integration  # real server / CLI processes against the fake ThinQ API
 npm run typecheck         # server, web and test code
 ```
 
-Tests use Node's built-in runner (`node:test`) via tsx; React components are
-tested with Testing Library on [happy-dom](https://github.com/capricorn86/happy-dom).
+No network access or real ThinQ account is needed. Tests use Node's built-in
+runner (`node:test`) via tsx; React components are tested with Testing Library
+on [happy-dom](https://github.com/capricorn86/happy-dom).
+
+Integration tests start the real server and wait up to 60 s for it to answer
+(startup through tsx is slow on a busy machine); a server that crashes fails
+the test at once with its output. On slow CI machines raise the wait with
+`TEST_SERVER_STARTUP_TIMEOUT_MS`.
 
 | Directory | What it covers |
 | --- | --- |
-| `test/unit/server/` | Password hashing and verification, sessions, cookies, the login rate limiter, user provisioning, CLI argument parsing, ThinQ client and config, DB constraints, and every HTTP route via `app.inject()` (auth gate audit, error mapping, static hosting) |
-| `test/unit/web/` | The browser API client, device-state formatting (`deviceFormat`), `DeviceCard`, `LoginPage`, the `App` auth gate and `DevicesPage` |
-| `test/integration/` | The server against the [fake ThinQ API](#fake-thinq-api), the fake's own contract, and the `add_user` CLI as a real process |
+| `test/unit/server/` | Password hashing and verification, sessions, cookies, the login rate limiter, user provisioning, CLI argument parsing, ThinQ client and config, DB constraints, and every HTTP route via `app.inject()` (auth gate audit, error mapping, static hosting); the [device events](#device-events) pipeline: state diff, event settings, the poller against the fake ThinQ API and event streams (`event-*.test.ts`) |
+| `test/unit/web/` | The browser API client, device-state formatting (`deviceFormat`), `DeviceCard`, `LoginPage`, the `App` auth gate and `DevicesPage`; for device events (`events-*.test.ts(x)`): the event API calls, event formatting, the live event stream, and the devices and events screens driven like a user would |
+| `test/integration/` | The server against the [fake ThinQ API](#fake-thinq-api), the fake's own contract, the `add_user` CLI as a real process, and device events end to end (subscriptions, polling, history, Server-Sent Event streams, shutdown) |
 
 Security-relevant cases are tested explicitly: an audit that every `/api` route
 except login/logout/me rejects anonymous and forged sessions, session rotation
 on login, hashed session tokens, cookie flags, username enumeration, brute-force
 throttling (including whitespace/case bypass attempts), tampered password
 digests, injection-style input, path traversal, XSS in rendered data and error
-messages, and that 500 responses don't leak internals.
+messages, that 500 responses don't leak internals, and that event streams are
+limited per user and end with their session (logout, password change, expiry).
 
 Helpers: `test/helpers/test-db.ts` gives each test file its own SQLite file
-(import it first), `app.ts` builds the real app with a stub ThinQ client
-(`stub-thinq.ts`), `fetch.ts` routes `fetch()` in web tests, and `dom.ts`
-installs the browser globals. In web tests, use `assertAbsent`/`assertSameNode`
-from `dom.ts` rather than passing DOM nodes to `node:assert`: when such an
-assertion fails, Node tries to print the happy-dom node and the run hangs
-instead of reporting the failure.
+(opened on import), `app.ts` builds the real app with a stub ThinQ client
+(`stub-thinq.ts`), and `app-server.ts` runs the real server as a child process
+with an API client and a Server-Sent Events reader (see
+[Fake ThinQ API](#fake-thinq-api)). For web tests, `dom.ts` installs the browser
+globals, including the fake `EventSource` from `event-source.ts` that tests
+drive by hand; `fetch.ts` stubs `fetch()` with a route table (unrouted requests
+fail loudly); and `fake-backend.tsx` is a stateful fake of the server API on
+top of it, with fixtures and a render helper, for the events UI;
+`locale.ts` sets the browser's language, which times are formatted in. In web tests,
+use `assertAbsent`/`assertSameNode` from `dom.ts` rather than passing DOM nodes
+to `node:assert`: when such an assertion fails, Node tries to print the
+happy-dom node and the run hangs instead of reporting the failure.
 
 The project `.npmrc` sets `ignore-scripts=true`: better-sqlite3 ships prebuilt
 binaries, but npm would otherwise run a no-op `node-gyp rebuild` that downloads
@@ -80,7 +93,17 @@ in plaintext. Signing in creates a row in `sessions` and sets an HttpOnly,
 SameSite=Lax session cookie (7 days by default, `SESSION_TTL_HOURS` to change).
 Changing a password with `--force` signs that user out everywhere. Put the app
 behind HTTPS in production so the cookie is sent with the `Secure` flag
-(auto-detected, or force it with `COOKIE_SECURE=true`).
+(auto-detected, or force it with `COOKIE_SECURE=true`; `false` turns it off).
+
+## Configuration
+
+Settings come from the environment (`.env`, see `.env.example`). The server
+checks all of them at startup (`src/server/config.ts`): an invalid value, such
+as `PORT=http` or `SESSION_TTL_HOURS=forever`, stops it with a message listing
+every problem, before it touches the database. The ThinQ settings are the
+exception: without a token the server still starts, and device calls answer
+`503` until it is set. `add_user` uses only `DATABASE_PATH`, so other settings
+can't stop it.
 
 ## Device cards
 
@@ -95,7 +118,10 @@ snapshot. A card shows:
 - **alerts** that need attention (door open, rinse aid low, filter to replace,
   appliance error) and chips for the **modes that are switched on**;
 - **All details**: every property the device reports, labelled and formatted
-  (units, durations, on/off), with the raw JSON underneath for debugging.
+  (units, durations, on/off), with the raw JSON underneath for debugging;
+- a *Watching* badge when the device is subscribed to
+  [device events](#device-events), and an **Events** button that opens its
+  events panel below the cards.
 
 The interpretation lives in `src/web/deviceFormat.ts`. It recognises property
 names ThinQ uses across appliances (`runState`, `timer`, `temperature`,
@@ -120,6 +146,86 @@ from `THINQ_COUNTRY_CODE` (`api-aic` Americas, `api-eic` Europe/Middle East/Afri
 Failures come back as `502` with `thinqStatus`/`thinqCode` from ThinQ, `504` when
 ThinQ times out (15 s), and `503` when the token or country is not configured.
 
+## Device events
+
+Subscribe a device to get an event whenever its state changes. The server
+polls the state of subscribed devices (`GET /devices/{id}/state`) and compares
+each result with the last one it saw; a difference is stored as an event and
+pushed to open event streams. Subscriptions belong to the ThinQ account, so
+they are shared by all users. Control commands sent through the app are
+recorded as events too.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/subscriptions` | Subscribed devices (last poll, last change, last error) and the poller status (`idle` / `paused`) |
+| `PUT /api/devices/:id/subscription` | Subscribe (`201`; `200` if already subscribed). The first poll only records a baseline |
+| `DELETE /api/devices/:id/subscription` | Unsubscribe (`204`); past events are kept |
+| `GET /api/events?deviceId=&kind=&before=&offset=&limit=` | History, newest first. `kind` is `event` (state change) or `control`; page with `before` = smallest id seen, or jump with `offset` (up to 100,000; combine with a fixed `before` for pages that don't shift); `limit` up to 200 |
+| `GET /api/events/count?deviceId=&kind=&before=` | `{ total }`: how many events match, for page counts |
+| `GET /api/events/stream?deviceId=&kind=` | Live events as [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events); reconnecting clients send `Last-Event-ID` and get up to 500 missed events |
+
+A state-change event looks like this; `report` is the changed part of the state
+(shaped like ThinQ's own partial reports) and `changes` lists each value:
+
+```json
+{
+  "id": 42, "deviceId": "7d3e…1a2b", "kind": "event", "createdAt": "2026-01-01T10:15:00.000Z",
+  "payload": {
+    "source": "poll",
+    "report": { "runState": { "currentState": "END" } },
+    "changes": [{ "path": "runState.currentState", "from": "RUNNING", "to": "END" }]
+  }
+}
+```
+
+Location-based resources are matched by `locationName`, e.g.
+`temperature[FREEZER].targetTemperature`.
+
+**In the app.** Press *Events* on a device's card to open its events panel
+below the cards, and choose *Watch state changes*; watched devices are marked
+*Watching* on their cards. The panel shows when the device was last checked,
+the last error and its latest events. Cards update their status as events
+arrive, without another ThinQ call. Events are described in the card's words
+("Status: Running → Finished", "Freezer · Target temperature: −21 °C"); hover a
+line for the device's own names (`runState.currentState: RUNNING → END`). All
+times, on cards and events, follow the browser's language (e.g. 2:05 PM or
+14:05). The *Events* tab lists all events newest first, filtered by
+device and type, a page at a time (10, 25, 50 or 100 per page, with numbered
+pages and *Newer* / *Older*), with each event's full data under *Details*.
+The first page is live: new events appear on top. Older pages stay put while
+new events arrive (they are pinned below the newest event you had seen), and a
+notice says how many newer events there are, with a button back to the
+newest. New events appear live (the indicator shows *Live*,
+*Reconnecting…* or *Disconnected*); the app keeps one stream open, reconnects
+after interruptions and returns to the login page when the session has ended.
+
+**Polling and the ThinQ call budget.** `EVENT_POLL_INTERVAL_SECONDS` (default 60)
+sets the interval. Every poll is one ThinQ call per subscribed device, and
+ThinQ limits calls per account, so the server:
+
+- refuses to start with an interval below 15 s (allowed only when
+  `THINQ_API_BASE_URL` points at this machine, i.e. the fake);
+- polls devices one at a time and each at most once per interval, however
+  often devices are subscribed, unsubscribed or re-subscribed;
+- backs off a device whose poll fails for device reasons (offline, removed),
+  doubling up to 15 minutes, and shows the error on its subscription;
+- pauses all polling on anything else (rate limit `1306`, bad token, ThinQ
+  down, unknown errors), doubling up to 30 minutes;
+- ignores states that are not a JSON object, nested deeper than 32 levels or
+  larger than 256 KB.
+
+Polling never sends commands. With no subscriptions it makes no ThinQ calls.
+
+**Retention.** State-change events older than `EVENT_RETENTION_DAYS` (default 30)
+are deleted at startup and hourly. Control records are kept as an audit trail.
+
+**Streams and sessions.** A stream is tied to the session that opened it: the
+session is re-checked before every event and every 25 s, so logging out (which
+closes the session's streams at once), a password change or session expiry
+ends it. Each user can have 5 streams open (100 in total); clients that stop
+reading are disconnected. Behind a reverse proxy, make sure responses are not
+buffered (the server sends `X-Accel-Buffering: no` for nginx).
+
 ## Fake ThinQ API
 
 `test/fake-thinq/` is a stand-in for the ThinQ Connect API, for integration
@@ -134,7 +240,7 @@ and error envelopes) and serves two devices:
 
 Control commands are checked against each device's profile: unknown or
 read-only properties, out-of-range values and wrong types are rejected with
-ThinQ-style error codes, and accepted commands change the state. The fake also
+ThinQ error codes, and accepted commands change the state. The fake also
 checks the bearer token, `x-api-key`, the required `x-*` headers and that
 every `x-message-id` is well-formed and unique.
 
@@ -149,20 +255,55 @@ npm run dev:fake                 # fake ThinQ on :8090 + API on :3000 + SPA on :
 server at the fake and uses `data/lg-home-fake.db` so fake devices never mix
 with real ones. To run only the fake: `npm run fake-thinq` (options:
 `FAKE_THINQ_PORT`, `FAKE_THINQ_HOST`, `FAKE_THINQ_TOKEN` to require one exact
-token, `FAKE_THINQ_TIME_SCALE=60` to run a dishwasher minute per second).
+token, `FAKE_THINQ_TIME_SCALE=60` to run a dishwasher minute per second,
+`FAKE_THINQ_ACTIVITY_SECONDS` and `FAKE_THINQ_SEED`, see below).
+
+**Simulated activity.** The standalone fake "uses" its appliances on its own,
+every 15 s by default (`FAKE_THINQ_ACTIVITY_SECONDS`; `0` turns it off), like
+people in a home would. So with `dev:fake`, watching a device in the app
+produces device events without any scripting: the first ones arrive within
+about 20 s. The actions (logged by the fake as `activity: ...`):
+
+| Appliance | What happens |
+| --- | --- |
+| Kitchen Fridge | Door opens, and closes again on the next step; express fridge is switched on at the panel and switches itself off a few steps later; the fridge compartment is set a degree up or down (1–7 °C). In sabbath mode only the door moves |
+| Dishwasher | Door opens (which cancels remote start, as on LG dishwashers) and closes again; remote start is enabled at the panel, so the app can start it; a QUICK or TURBO programme is started at the panel and runs to the end (use `FAKE_THINQ_TIME_SCALE` to speed it up); a dishwasher switched off from the app is powered on again. Nothing else happens while a programme runs |
+
+Simulated actions only produce states the device profiles allow, and a
+disconnected appliance does nothing. The fake can't see which devices the app
+watches (subscriptions live in the app's server; ThinQ is only polled), so
+every appliance is active and the app decides which changes become events.
+`FAKE_THINQ_SEED=<integer>` makes the sequence of actions repeatable.
 
 Set up scenarios with the fake-only endpoints (no auth, bind to localhost only):
 
 ```sh
 curl localhost:8090/__fake/requests                     # recorded ThinQ calls
-curl -X POST localhost:8090/__fake/reset                # back to initial state
+curl -X POST localhost:8090/__fake/reset                # back to initial state (also clears faults)
 # press "remote start" on the dishwasher
 curl -X PATCH localhost:8090/__fake/devices/7d3e9a1c5b2f4e8a9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   -H 'Content-Type: application/json' -d '{"state":{"remoteControlEnable":{"remoteControlEnabled":true}}}'
 # take the fridge offline
 curl -X PATCH localhost:8090/__fake/devices/b2f6c91d0a4e4f5c9e8d7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d \
   -H 'Content-Type: application/json' -d '{"online":false}'
+# make ThinQ rate-limit the account until cleared (error: any key of ERRORS in protocol.ts;
+# optional "method", exact "path", "times": n or "always", default 1)
+curl -X POST localhost:8090/__fake/faults \
+  -H 'Content-Type: application/json' -d '{"error":"EXCEEDED_API_CALLS","times":"always"}'
+curl localhost:8090/__fake/faults                       # faults not used up yet
+curl -X DELETE localhost:8090/__fake/faults             # clear them
+# simulated activity: status and recent actions, one step now (all or one device), pause/resume/retime
+curl localhost:8090/__fake/activity
+curl -X POST localhost:8090/__fake/activity/step -H 'Content-Type: application/json' \
+  -d '{"deviceId":"b2f6c91d0a4e4f5c9e8d7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d"}'
+curl -X PATCH localhost:8090/__fake/activity -H 'Content-Type: application/json' -d '{"running":false}'
+curl -X PATCH localhost:8090/__fake/activity -H 'Content-Type: application/json' -d '{"running":true,"intervalSeconds":5}'
 ```
+
+Patching state, the dishwasher's programme running out and control commands
+all change the state the server polls, so they show up as device events when
+the device is subscribed (`dev:fake` polls every 5 s). Faults are applied
+after the header checks, so requests still have to be valid.
 
 In tests, use it in-process with a controllable clock:
 
@@ -172,9 +313,24 @@ const fake = new FakeThinQ({ accessToken: "pat-test", now: () => clock });
 const url = await fake.listen();         // pass as THINQ_API_BASE_URL
 fake.device(DISHWASHER_ID)!.patchState({ remoteControlEnable: { remoteControlEnabled: true } });
 clock += 90 * 60_000;                     // fast-forward the running programme
+fake.injectFault({ error: "EXCEEDED_API_CALLS", path: /\/state$/, times: 3 });
 fake.requests;                            // what the app sent
 ```
 
-The device data and error codes are modelled on the ThinQ Connect docs but are
-not an exact copy of any real model; keep `test/fake-thinq/protocol.ts`
-(`ERRORS`) and `devices.ts` in line with the live API if they drift.
+In-process, simulated activity is off unless you ask for it: pass
+`activity: { seed: 1 }` and call `fake.stepActivity()` (or
+`fake.stepActivity(deviceId)`) to make things happen deterministically, or add
+`intervalMs` to run it on a timer once listening. `fake.activityLog` lists what
+happened.
+
+`test/helpers/app-server.ts` starts the real server as a child process against
+the fake and has a small Server-Sent Events client, for integration tests like
+`test/integration/events.e2e.test.ts`.
+
+The device data is modelled on the ThinQ Connect docs but is not an exact copy
+of any real model. Error codes come from the official list in LG's
+`thinqconnect` SDK, copied into `THINQ_ERROR_CODES` in
+`test/fake-thinq/protocol.ts`; the fake's `ERRORS` must use those names and
+codes (enforced by the type checker and a test), while the HTTP statuses are
+our best model of the live service. Keep both files in line with the live API
+if they drift.

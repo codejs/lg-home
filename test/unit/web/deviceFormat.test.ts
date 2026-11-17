@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { setBrowserLanguages } from "../../helpers/locale.js";
 import {
   describeState,
   deviceTypeLabel,
@@ -9,6 +10,8 @@ import {
   formatWithUnit,
   humanizeEnum,
   humanizeKey,
+  labelForPath,
+  pathKey,
   locationLabel,
   summarize,
   type Json,
@@ -314,13 +317,32 @@ describe("summarize", () => {
   });
 
   it("dishwasher running: time left with end time, progress", () => {
-    const s = summarize(dishwasherState({ startedMinutesAgo: 60 }), NOW);
-    assert.deepEqual(s.status, { label: "Running", tone: "active" });
-    assert.deepEqual(s.highlights, [
-      { label: "Time left", value: "1 h 15 min", hint: "ends ~11:15" },
-      { label: "Programme", value: "Auto" },
-    ]);
-    assert.deepEqual(s.progress, { remaining: 75, total: 135 });
+    const restore = setBrowserLanguages("en-GB");
+    try {
+      const s = summarize(dishwasherState({ startedMinutesAgo: 60 }), NOW);
+      assert.deepEqual(s.status, { label: "Running", tone: "active" });
+      assert.deepEqual(s.highlights, [
+        { label: "Time left", value: "1 h 15 min", hint: "ends ~11:15" },
+        { label: "Programme", value: "Auto" },
+      ]);
+      assert.deepEqual(s.progress, { remaining: 75, total: 135 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("gives the end time in the browser's locale", () => {
+    const hint = (...languages: string[]) => {
+      const restore = setBrowserLanguages(...languages);
+      try {
+        return summarize(dishwasherState({ startedMinutesAgo: 60 }), NOW).highlights[0].hint?.replace(/\u202f/g, " ");
+      } finally {
+        restore();
+      }
+    };
+    assert.equal(hint("en-US"), "ends ~11:15 AM");
+    assert.equal(hint("en-GB"), "ends ~11:15");
+    assert.equal(hint("de-DE"), "ends ~11:15");
   });
 
   it("dishwasher finished: done tone, no timer", () => {
@@ -468,5 +490,49 @@ describe("robustness against malformed state", () => {
     assert.equal(formatWithUnit(1, "constructor"), "1 constructor");
     assert.equal(formatValue("constructor", true), "On");
     assert.equal(summarize({ runState: { currentState: "toString" } }, NOW).status?.tone, "idle");
+  });
+});
+
+describe("labelForPath (device events)", () => {
+  it("names values in the card's words", () => {
+    assert.equal(labelForPath("runState.currentState"), "Status");
+    assert.equal(labelForPath("powerSave.powerSaveEnabled"), "Power save");
+    assert.equal(labelForPath("remoteControlEnable.remoteControlEnabled"), "Remote start");
+    assert.equal(labelForPath("refrigeration.expressMode"), "Cooling › Express freeze");
+    assert.equal(labelForPath("airConJobMode.currentJobMode"), "Mode");
+  });
+
+  it("puts the compartment first, as the card does", () => {
+    assert.equal(labelForPath("temperature[FREEZER].targetTemperature"), "Freezer · Target temperature");
+    assert.equal(labelForPath("doorStatus[FRIDGE].doorState"), "Fridge · Door");
+    assert.equal(labelForPath("temperature[FREEZER]"), "Freezer · Temperature");
+  });
+
+  it("names timer parts after the card's durations", () => {
+    assert.equal(labelForPath("timer.remainMinute"), "Timer › Time left (min)");
+    assert.equal(labelForPath("timer.totalHour"), "Timer › Programme length (h)");
+    assert.equal(labelForPath("timer.someMinute"), "Timer › Some minute", "unknown timers are humanised");
+  });
+
+  it("humanises unknown keys and keeps odd input as text", () => {
+    assert.equal(labelForPath("fooBar.bazQux"), "Foo bar › Baz qux");
+    assert.equal(labelForPath("runState"), "Status");
+    assert.equal(labelForPath(""), "");
+    assert.equal(labelForPath("constructor.toString"), "Constructor › To string");
+    assert.equal(labelForPath("x.__proto__"), "X › Proto");
+  });
+
+  it("matches the labels of the card's details for the same values", () => {
+    const rows = describeState(fridgeState()).flatMap((g) => g.rows.map((r) => r.label));
+    assert.ok(rows.includes(labelForPath("temperature[FREEZER].targetTemperature")));
+    assert.ok(rows.includes(labelForPath("powerSave.powerSaveEnabled")));
+    const dwRows = describeState(dishwasherState()).flatMap((g) => g.rows.map((r) => r.label));
+    assert.ok(dwRows.includes(labelForPath("runState.currentState")));
+  });
+
+  it("pathKey is the last property of a path", () => {
+    assert.equal(pathKey("temperature[FREEZER].targetTemperature"), "targetTemperature");
+    assert.equal(pathKey("a.b.c"), "c");
+    assert.equal(pathKey("runState"), "runState");
   });
 });

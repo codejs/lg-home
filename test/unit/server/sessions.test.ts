@@ -4,13 +4,12 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, it } from "node:test";
 import { eq } from "drizzle-orm";
 import {
-  SESSION_TTL_MS,
+  DEFAULT_SESSION_TTL_MS,
   createSession,
   deleteExpiredSessions,
   deleteSession,
   deleteUserSessions,
   getSessionUser,
-  sessionTtlMs,
 } from "../../../src/server/auth.js";
 import { provisionUser } from "../../../src/server/users.js";
 
@@ -56,11 +55,21 @@ describe("sessions", () => {
       assert.ok(!rows.some((r) => r.id === token));
     });
 
-    it("expires after the configured TTL", () => {
+    it("expires after 7 days by default", () => {
       const before = Date.now();
       const { expiresAt } = createSession(alice);
       const delta = expiresAt.getTime() - before;
-      assert.ok(delta >= SESSION_TTL_MS - 1000 && delta <= SESSION_TTL_MS + 1000);
+      assert.equal(DEFAULT_SESSION_TTL_MS, 7 * 24 * 60 * 60 * 1000);
+      assert.ok(delta >= DEFAULT_SESSION_TTL_MS - 1000 && delta <= DEFAULT_SESSION_TTL_MS + 1000);
+    });
+
+    it("expires after the lifetime it is given (SESSION_TTL_HOURS)", () => {
+      const before = Date.now();
+      const { token, expiresAt } = createSession(alice, 60 * 60 * 1000);
+      const delta = expiresAt.getTime() - before;
+      assert.ok(delta >= 3_599_000 && delta <= 3_601_000, `got ${delta} ms`);
+      const stored = db.select().from(schema.sessions).where(eq(schema.sessions.id, sha256(token))).get()!;
+      assert.equal(stored.expiresAt.getTime(), expiresAt.getTime());
     });
 
     it("prunes expired sessions as a side effect", () => {
@@ -151,27 +160,4 @@ describe("sessions", () => {
       assert.equal(db.select().from(schema.sessions).all().length, 0);
     });
   });
-});
-
-describe("sessionTtlMs", () => {
-  const HOUR = 60 * 60 * 1000;
-
-  it("defaults to 7 days", () => {
-    assert.equal(sessionTtlMs({}), 7 * 24 * HOUR);
-    assert.equal(sessionTtlMs({ SESSION_TTL_HOURS: "" }), 7 * 24 * HOUR);
-    assert.equal(sessionTtlMs({ SESSION_TTL_HOURS: "  " }), 7 * 24 * HOUR);
-  });
-
-  it("accepts positive hours, including fractions", () => {
-    assert.equal(sessionTtlMs({ SESSION_TTL_HOURS: "1" }), HOUR);
-    assert.equal(sessionTtlMs({ SESSION_TTL_HOURS: "0.5" }), HOUR / 2);
-    assert.equal(sessionTtlMs({ SESSION_TTL_HOURS: " 24 " }), 24 * HOUR);
-  });
-
-  // Regression: "abc" used to yield NaN and make every login fail with a 500.
-  for (const bad of ["abc", "0", "-1", "NaN", "Infinity", "1e9", "12h"]) {
-    it(`rejects ${JSON.stringify(bad)} with a clear error`, () => {
-      assert.throws(() => sessionTtlMs({ SESSION_TTL_HOURS: bad }), /SESSION_TTL_HOURS/);
-    });
-  }
 });
